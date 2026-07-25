@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>停车票核销报表生成器</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f0f2f5;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08);padding:48px;width:560px;text-align:center}
+h1{font-size:24px;color:#1a1a1a;margin-bottom:6px}
+.sub{color:#888;font-size:14px;margin-bottom:32px}
+.upload-zone{border:2px dashed #d0d5dd;border-radius:12px;padding:40px 24px;cursor:pointer;transition:all .2s;margin-bottom:20px}
+.upload-zone:hover,.dragover{border-color:#4f46e5;background:#f8f7ff}
+.upload-zone .icon{font-size:40px;margin-bottom:8px}
+.upload-zone .text{color:#666;font-size:15px}
+.upload-zone .hint{color:#aaa;font-size:13px;margin-top:6px}
+.upload-zone input{display:none}
+.btn{width:100%;padding:14px;border:none;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer;transition:all .2s}
+.btn-go{background:#4f46e5;color:#fff;display:none}
+.btn-go:hover{background:#4338ca}
+.btn-go:disabled{background:#a5b4fc;cursor:not-allowed}
+.status{margin-top:18px;padding:12px;border-radius:8px;font-size:14px;display:none}
+.status.ok{background:#f0fdf4;color:#166534;display:block}
+.status.err{background:#fef2f2;color:#991b1b;display:block}
+.status.info{background:#eff6ff;color:#1e40af;display:block}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid #a5b4fc;border-top-color:#4f46e5;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.summary{margin-top:16px;text-align:left;font-size:13px;max-height:300px;overflow-y:auto;display:none}
+.summary table{width:100%;border-collapse:collapse}
+.summary td{padding:2px 8px;font-size:13px}
+.summary tr td:first-child{font-weight:600;color:#333;width:140px}
+@media (prefers-color-scheme:dark){
+  body{background:#1a1a2e}.card{background:#16213e;box-shadow:0 4px 24px rgba(0,0,0,.3)}
+  h1{color:#e0e0e0}.sub{color:#999}.upload-zone{border-color:#333}
+  .upload-zone:hover,.dragover{border-color:#6366f1;background:#1e1e3a}
+  .upload-zone .text{color:#ccc}.upload-zone .hint{color:#777}
+  .status.ok{background:#0d2818;color:#4ade80}.status.err{background:#2d1010;color:#f87171}
+  .status.info{background:#0c1929;color:#60a5fa}
+}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>&#x1F17F;&#xFE0F; 停车票核销报表</h1>
+  <p class="sub">上传总表 Excel &#x2192; 自动生成 31 个子表 &#x2192; 下载</p>
+  <div class="upload-zone" id="zone" onclick="document.getElementById('file').click()">
+    <div class="icon">&#x1F4C1;</div>
+    <div class="text">点击选择文件，或拖拽 .xlsx 到这里</div>
+    <div class="hint">需包含「停车票核销记录报表」Sheet</div>
+    <input type="file" id="file" accept=".xlsx"/>
+  </div>
+  <button class="btn btn-go" id="btn" onclick="generate()">&#x26A1; 生成报表</button>
+  <div class="status" id="status"></div>
+  <div class="summary" id="summary"></div>
+</div>
+<script>
+var MAIN_SHEET_NAME='停车票核销记录报表';
+var MERCHANT_KW={
+  '爱康':'广州爱康国宾','爱康口腔':'爱康林和口腔','爱来':'爱来医疗美容',
+  '阿玛施':'阿玛施眼科','歌蕊':'歌蕊医疗','皆大欢洗':'皆大欢洗',
+  '新奥美嘉':'新奥美嘉医疗','丝芭':'丝芭文化','哥弟':'哥弟集团来访',
+  '精应':'哥弟马总','物业':'中泰物业来访','商管':'中泰商管来访'
+};
+var F6=new Set(['jhxg08','jhxg09','jhxg10']);
+var F4=new Set(['jhxg','jhxg01','jhxg02','jhxg03','jhxg04','jhxg06']);
+var F35=new Set(['jhxg11']),F46=new Set(['jhxg07']);
+var TIME_RANGES={'3小时':[1,3],'12小时':[4,12],'24小时':[13,24],'大于一天':[25,9999]};
+var SHEET_ORDER=[
+  '停车票核销记录报表','爱康','爱康口腔','爱来','阿玛施','歌蕊','皆大欢洗','新奥美嘉',
+  '丝芭','哥弟','精应','物业','商管','集团',
+  '35楼3小时','35楼12小时','35楼24小时',
+  '46楼3小时','46楼12小时','46楼24小时',
+  '九号','九号6楼','6楼3小时','6楼12小时','6楼24小时','6楼大于一天',
+  '九号4楼','4楼3小时','4楼12小时','4楼24小时','4楼大于一天'
+];
+var HEADERS=['车场','停','车票名称','商家名称','发放时间','A','领取车牌','发放账号','状态'];
+var CL='ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+
+// Styles
+var B_THIN={top:{style:'thin',color:{rgb:'B0B0B0'}},bottom:{style:'thin',color:{rgb:'B0B0B0'}},left:{style:'thin',color:{rgb:'B0B0B0'}},right:{style:'thin',color:{rgb:'B0B0B0'}}};
+var B_HDR={top:{style:'thin',color:{rgb:'1A4472'}},bottom:{style:'medium',color:{rgb:'1A4472'}},left:{style:'thin',color:{rgb:'1A4472'}},right:{style:'thin',color:{rgb:'1A4472'}}};
+var B_TTL={top:{style:'medium',color:{rgb:'2B579A'}},bottom:{style:'double',color:{rgb:'2B579A'}},left:{style:'thin',color:{rgb:'B0B0B0'}},right:{style:'thin',color:{rgb:'B0B0B0'}}};
+var S_HDR={font:{bold:true,sz:11,name:'微软雅黑',color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'2B579A'}},alignment:{horizontal:'center',vertical:'center',wrapText:true},border:B_HDR};
+var S_R1={font:{sz:10.5,name:'微软雅黑',color:{rgb:'333333'}},fill:{fgColor:{rgb:'FFFFFF'}},alignment:{vertical:'center',wrapText:true},border:B_THIN};
+var S_R2={font:{sz:10.5,name:'微软雅黑',color:{rgb:'333333'}},fill:{fgColor:{rgb:'F2F6FC'}},alignment:{vertical:'center',wrapText:true},border:B_THIN};
+var S_TTL={font:{bold:true,sz:11,name:'微软雅黑',color:{rgb:'1A4472'}},fill:{fgColor:{rgb:'D6E4F0'}},alignment:{vertical:'center',horizontal:'center'},border:B_TTL};
+
+// Helpers
+function filterByKW(rows,kw){return rows.filter(function(r){return r[3]&&String(r[3]).indexOf(kw)>=0;});}
+function filterByAcct(rows,accts){return rows.filter(function(r){return accts.has(String(r[7]||''));});}
+function filterByHours(rows,min,max){return rows.filter(function(r){var v=Number(r[1]);return !isNaN(v)&&v>=min&&v<=max;});}
+function toNum(v){if(v==null||v==='')return NaN;if(typeof v==='number')return v;return Number(v);}
+function rnd(v,d){if(v==null||v===''||isNaN(Number(v)))return'';return Number(Number(v).toFixed(d||2));}
+function dateOnly(d){if(!d)return'';var dt=d instanceof Date?d:new Date(d);if(isNaN(dt.getTime()))return String(d);return new Date(dt.getFullYear(),dt.getMonth(),dt.getDate());}
+function dateStr(d){if(!d)return'';var dt=d instanceof Date?d:new Date(d);if(isNaN(dt.getTime()))return String(d);return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');}
+function timeStr(v){if(v==null||v==='')return'';if(v instanceof Date&&!isNaN(v.getTime()))return [v.getHours(),v.getMinutes(),v.getSeconds()].map(function(x){return String(x).padStart(2,'0');}).join(':');return String(v);}
+
+function dcopy(o){return JSON.parse(JSON.stringify(o));}
+function scell(ws,c,r,style){var ref=CL[c]+(r+1);if(ws[ref])ws[ref].s=dcopy(style);}
+
+// ============================================================
+// Format sheet: A-I and L-M are INDEPENDENT
+//   A-I (0-8):  styled for data rows only (1..dataEndRow)
+//   L+  (11+):  styled for pivot data (1..pivotEndRow) + total row
+//   J-K (9-10): never styled
+//   total row (totalRow): L+ styled as total, A-I follows data rule
+// ============================================================
+function formatSheet(ws,opts){
+  var nc=opts.numCols,w=opts.widths,de=opts.dataEndRow,pe=opts.pivotEndRow,tr=opts.totalRow;
+  ws['!cols']=[];for(var i=0;i<nc;i++)ws['!cols'].push({wch:w[i]||12});
+  ws['!rows']=[];ws['!rows'][0]={hpt:30};
+
+  // Header
+  for(var c=0;c<nc;c++){if(c<=8||c>=11)scell(ws,c,0,S_HDR);}
+
+  var lastR=Math.max(de,pe!=null?pe:0,tr!=null?tr:0);
+  for(var r=1;r<=lastR;r++){
+    // A-I: only if this row has data
+    if(r<=de){
+      var sA=(r%2===1)?S_R1:S_R2;
+      for(var cA=0;cA<=8;cA++)scell(ws,cA,r,sA);
+    }
+    // L+: pivot data rows (before total)
+    if(pe!=null&&r<=pe){
+      var sL=(r%2===1)?S_R1:S_R2;
+      for(var cL=11;cL<nc;cL++)scell(ws,cL,r,sL);
+    }
+    // Total row in L+
+    if(tr!=null&&r===tr){
+      for(var cT=11;cT<nc;cT++)scell(ws,cT,r,S_TTL);
+      ws['!rows'][r]={hpt:28};
+    }
+  }
+}
+
+// ============================================================
+// Normalize row
+// ============================================================
+function normRow(r){
+  var out=r.slice(0,9);
+  var bv=toNum(out[1]);if(!isNaN(bv))out[1]=bv;
+  if(out[4]!=null&&out[4] instanceof Date&&!isNaN(out[4].getTime()))out[4]=dateStr(out[4]);
+  if(out[5]!=null)out[5]=timeStr(out[5]);
+  return out;
+}
+
+// Build pivot
+function buildPivot(rows,valIdx){
+  var groups=new Map(),total=0;
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i],val=toNum(r[valIdx]);if(isNaN(val))continue;
+    total+=val;var key=r[4]?dateOnly(r[4]).getTime():'blank';
+    groups.set(key,(groups.get(key)||0)+val);
+  }
+  var entries=[];groups.forEach(function(v,k){if(k!=='blank')entries.push([k?dateStr(new Date(k)):'',v]);});
+  entries.sort(function(a,b){return a[0]<b[0]?-1:a[0]>b[0]?1:0;});
+  if(groups.has('blank'))entries.push(['(空白)',groups.get('blank')]);
+  return {entries:entries,total:rnd(total,2)};
+}
+
+// ============================================================
+// Data only
+// ============================================================
+function buildDataOnly(data){
+  var s=[];s.push(HEADERS.slice());
+  for(var i=0;i<data.length;i++)s.push(normRow(data[i]));
+  return {data:s,dataEndRow:data.length,pivotEndRow:null,totalRow:null};
+}
+
+// ============================================================
+// Merchant / Group: data + pivot INTERLEAVED, total right after last pivot
+// ============================================================
+function buildDataWithPivot(data,pivot,pivotLabel){
+  var s=[],ps=11,nc=ps+2;
+  var hdr=HEADERS.slice();while(hdr.length<ps)hdr.push('');hdr.push('日期',pivotLabel);s.push(hdr);
+
+  var pe=pivot.entries.length;
+  var maxRows=Math.max(data.length,pe+1);
+  for(var i=0;i<maxRows;i++){
+    var row=[];
+    if(i<data.length)row.push.apply(row,normRow(data[i]));
+    while(row.length<ps)row.push('');
+    if(i<pe)row.push(pivot.entries[i][0],pivot.entries[i][1]);
+    else if(i===pe)row.push('合计',pivot.total);
+    while(row.length<nc)row.push('');s.push(row);
+  }
+  return {data:s,dataEndRow:data.length,pivotEndRow:pe,totalRow:pe+1};
+}
+
+// ============================================================
+// 3h / 24h
+// ============================================================
+function buildTime3Or24(data,bVal,pivotLabel){
+  var s=[],ps=11,nc=ps+2;
+  var hdrs=HEADERS.concat(['B']);var hdr=hdrs.slice();while(hdr.length<ps)hdr.push('');hdr.push('日期',pivotLabel);s.push(hdr);
+
+  var enriched=[];for(var i=0;i<data.length;i++)enriched.push(normRow(data[i]).concat([bVal]));
+  var pivot=buildPivot(enriched,9);
+  var pe=pivot.entries.length;
+  var maxRows=Math.max(data.length,pe+1);
+  for(var i2=0;i2<maxRows;i2++){
+    var row=[];
+    if(i2<data.length)row.push.apply(row,enriched[i2]);
+    while(row.length<ps)row.push('');
+    if(i2<pe)row.push(pivot.entries[i2][0],pivot.entries[i2][1]);
+    else if(i2===pe)row.push('合计',pivot.total);
+    while(row.length<nc)row.push('');s.push(row);
+  }
+  return {data:s,dataEndRow:data.length,pivotEndRow:pe,totalRow:pe+1};
+}
+
+// ============================================================
+// 大于一天
+// ============================================================
+function buildTimeOver(data){
+  var s=[],ps=13,nc=15;
+  var hdrs=HEADERS.concat(['B','张']);var hdr=hdrs.slice();while(hdr.length<ps)hdr.push('');hdr.push('日期','求和项:张');s.push(hdr);
+
+  var enriched=[];for(var i=0;i<data.length;i++){
+    var r=normRow(data[i]),ting=toNum(r[1])||0;
+    enriched.push(r.concat([rnd(ting/12,2),Math.ceil(ting/12)]));
+  }
+  var pivot=buildPivot(enriched,10);
+  var pe=pivot.entries.length;
+  var maxRows=Math.max(data.length,pe+1);
+  for(var i2=0;i2<maxRows;i2++){
+    var row=[];
+    if(i2<data.length)row.push.apply(row,enriched[i2]);
+    while(row.length<ps)row.push('');
+    if(i2<pe)row.push(pivot.entries[i2][0],pivot.entries[i2][1]);
+    else if(i2===pe)row.push('合计',pivot.total);
+    while(row.length<nc)row.push('');s.push(row);
+  }
+  return {data:s,dataEndRow:data.length,pivotEndRow:pe,totalRow:pe+1};
+}
+
+// ============================================================
+// 12h
+// ============================================================
+function buildTime12(data,floorName,timeData){
+  var s24=floorName+'24小时',sOver=floorName+'大于一天';
+  var d24=timeData[s24]||[],dOver=timeData[sOver]||[];
+
+  var e12=[];for(var i=0;i<data.length;i++)e12.push(normRow(data[i]).concat([1]));
+  var e24=[];for(var i2=0;i2<d24.length;i2++)e24.push(normRow(d24[i2]).concat([2]));
+  var eOz=[];for(var i3=0;i3<dOver.length;i3++){var r3=normRow(dOver[i3]),t3=toNum(r3[1])||0;eOz.push(r3.concat([rnd(t3/12,2),Math.ceil(t3/12)]));}
+
+  var p12=buildPivot(e12,9),p24=buildPivot(e24,9),pOz=buildPivot(eOz,10);
+  var dateMap={};
+  [{l:'12h',d:p12.entries},{l:'24h',d:p24.entries},{l:'oz',d:pOz.entries}].forEach(function(p){
+    for(var i4=0;i4<p.d.length;i4++){var d=p.d[i4][0]||'(空白)',v=p.d[i4][1];if(!dateMap[d])dateMap[d]={};dateMap[d][p.l]=v;}
+  });
+  var sd=Object.keys(dateMap).filter(function(k){return k!=='(空白)';}).sort();
+  if(dateMap['(空白)'])sd.push('(空白)');
+
+  var sheet=[],as=11,ah=['日期','12小时B','24小时B','大于一天张','合计'],nc=as+ah.length;
+  var hdr=HEADERS.concat(['B']);while(hdr.length<as)hdr.push('');hdr.push.apply(hdr,ah);sheet.push(hdr);
+
+  var s12=0,s24c=0,sO2=0,sHj=0;
+  var pe=sd.length; // number of analysis data rows
+  var maxRows=Math.max(data.length,pe+1);
+  for(var i5=0;i5<maxRows;i5++){
+    var row=[];
+    if(i5<data.length)row.push.apply(row,e12[i5]);
+    while(row.length<as)row.push('');
+    if(i5<pe){
+      var dd=sd[i5],vals=dateMap[dd]||{};
+      var v12=vals['12h']||0,v24=vals['24h']||0,voz=vals['oz']||0,vhj=v12+v24+voz;
+      s12+=v12;s24c+=v24;sO2+=voz;sHj+=vhj;
+      row.push(dd,v12,v24,voz,vhj);
+    }else if(i5===pe){
+      row.push('合计',s12,s24c,sO2,sHj);
+    }
+    while(row.length<nc)row.push('');sheet.push(row);
+  }
+  return {data:sheet,dataEndRow:data.length,pivotEndRow:pe,totalRow:pe+1};
+}
+
+// ============================================================
+// Core
+// ============================================================
+function generate(){
+  var fi=document.getElementById('file'),file=fi.files[0];if(!file)return;
+  var btn=document.getElementById('btn'),status=document.getElementById('status'),sumDiv=document.getElementById('summary');
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span>处理中...';
+  status.className='status info';status.textContent='正在读取文件...';status.style.display='block';sumDiv.style.display='none';
+
+  setTimeout(function(){
+    try{
+      var reader=new FileReader();
+      reader.onload=function(e){
+        try{
+          status.textContent='正在解析数据...';
+          var wbIn=XLSX.read(e.target.result,{type:'array',cellDates:true});
+          var wsIn=wbIn.Sheets[MAIN_SHEET_NAME];
+          if(!wsIn)throw new Error('找不到「'+MAIN_SHEET_NAME+'」Sheet');
+          var rawRows=XLSX.utils.sheet_to_json(wsIn,{header:1,defval:null,dateNF:'yyyy-mm-dd'});
+          var headerRow=0;
+          for(var i=0;i<Math.min(rawRows.length,10);i++){if(rawRows[i]&&String(rawRows[i][0]).indexOf('车场')>=0){headerRow=i;break;}}
+          var rows=rawRows.slice(headerRow+1).filter(function(r){return r[0]!=null&&r[0]!=='';});
+          for(var ri=0;ri<rows.length;ri++){
+            var r=rows[ri],bv=toNum(r[1]);if(!isNaN(bv))r[1]=bv;
+            if(r[4]!=null&&!(r[4] instanceof Date)){var d4=new Date(r[4]);if(!isNaN(d4.getTime()))r[4]=d4;}
+          }
+          status.textContent='读取完成，共 '+rows.length+' 条记录';
+
+          var merchantData={};Object.keys(MERCHANT_KW).forEach(function(name){merchantData[name]=filterByKW(rows,MERCHANT_KW[name]);});
+          var jhxgAll=filterByKW(rows,'九号行馆');
+          var jhxg6f=filterByAcct(jhxgAll,F6),jhxg4f=filterByAcct(jhxgAll,F4);
+          var jhxg35f=filterByAcct(jhxgAll,F35),jhxg46f=filterByAcct(jhxgAll,F46);
+          var jhxgGroup=jhxg35f.concat(jhxg46f);
+          var jhxgJiuhao=jhxgAll.filter(function(r){return !F35.has(String(r[7]||''))&&!F46.has(String(r[7]||''));});
+          var floorMap={'6楼':jhxg6f,'4楼':jhxg4f,'35楼':jhxg35f,'46楼':jhxg46f};
+          var timeData={};
+          Object.keys(floorMap).forEach(function(fname){Object.keys(TIME_RANGES).forEach(function(tkey){timeData[fname+tkey]=filterByHours(floorMap[fname],TIME_RANGES[tkey][0],TIME_RANGES[tkey][1]);});});
+
+          var wbOut=XLSX.utils.book_new(),sum={},STDW=[14,8,18,24,16,8,14,16,10];
+
+          SHEET_ORDER.forEach(function(sname){
+            var result,widths;
+            if(sname===MAIN_SHEET_NAME){result=buildDataOnly(rows);widths=STDW.slice();sum[sname]=rows.length;}
+            else if(sname in MERCHANT_KW){var md=merchantData[sname];result=buildDataWithPivot(md,buildPivot(md,1),'求和项:停');widths=STDW.concat([12,12,14,14]);sum[sname]=md.length;}
+            else if(sname==='集团'){result=buildDataWithPivot(jhxgGroup,buildPivot(jhxgGroup,1),'求和项:停');widths=STDW.concat([12,12,14,14]);sum[sname]=jhxgGroup.length;}
+            else if(sname==='九号'){result=buildDataOnly(jhxgJiuhao);widths=STDW.slice();sum[sname]=jhxgJiuhao.length;}
+            else if(sname==='九号6楼'){result=buildDataOnly(jhxg6f);widths=STDW.slice();sum[sname]=jhxg6f.length;}
+            else if(sname==='九号4楼'){result=buildDataOnly(jhxg4f);widths=STDW.slice();sum[sname]=jhxg4f.length;}
+            else if(sname.indexOf('3小时')>=0){var d3=timeData[sname]||[];result=buildTime3Or24(d3,1,'求和项:B');widths=STDW.concat([8,12,14,14]);sum[sname]=d3.length;}
+            else if(sname.indexOf('24小时')>=0){var d24=timeData[sname]||[];result=buildTime3Or24(d24,2,'求和项:B');widths=STDW.concat([8,12,14,14]);sum[sname]=d24.length;}
+            else if(sname.indexOf('大于一天')>=0){var dO=timeData[sname]||[];result=buildTimeOver(dO);widths=STDW.concat([8,6,12,12,14,14]);sum[sname]=dO.length;}
+            else{var d12=timeData[sname]||[];result=buildTime12(d12,sname.replace('12小时',''),timeData);widths=STDW.concat([8,12,14,14,14,14,12]);sum[sname]=d12.length;}
+
+            var ws=XLSX.utils.aoa_to_sheet(result.data);
+            formatSheet(ws,{numCols:widths.length,widths:widths,dataEndRow:result.dataEndRow,pivotEndRow:result.pivotEndRow,totalRow:result.totalRow});
+            XLSX.utils.book_append_sheet(wbOut,ws,sname);
+          });
+
+          var wbout=XLSX.write(wbOut,{bookType:'xlsx',type:'array',cellStyles:true});
+          var outName=file.name.replace(/\.xlsx$/i,'')+'_停车票核销报表.xlsx';
+          var blob=new Blob([wbout],{type:'application/octet-stream'}),url=URL.createObjectURL(blob);
+          var a=document.createElement('a');a.href=url;a.download=outName;document.body.appendChild(a);a.click();
+          document.body.removeChild(a);URL.revokeObjectURL(url);
+
+          var html='<table>';Object.keys(sum).forEach(function(n){html+='<tr><td>'+n+'</td><td style="color:#888">'+sum[n]+' 条</td></tr>';});
+          html+='</table>';sumDiv.innerHTML=html;sumDiv.style.display='block';
+          status.className='status ok';status.textContent='✅ 报表生成完成，文件已下载！';btn.innerHTML='⚡ 生成报表';btn.disabled=false;
+        }catch(err){status.className='status err';status.textContent='❌ '+err.message;console.error(err);btn.innerHTML='⚡ 生成报表';btn.disabled=false;}
+      };
+      reader.readAsArrayBuffer(file);
+    }catch(err){status.className='status err';status.textContent='❌ '+err.message;btn.innerHTML='⚡ 生成报表';btn.disabled=false;}
+  },50);
+}
+
+var zone=document.getElementById('zone'),fi2=document.getElementById('file');
+['dragenter','dragover'].forEach(function(ev){zone.addEventListener(ev,function(e){e.preventDefault();zone.classList.add('dragover');});});
+['dragleave','drop'].forEach(function(ev){zone.addEventListener(ev,function(e){e.preventDefault();zone.classList.remove('dragover');});});
+zone.addEventListener('drop',function(e){var files=e.dataTransfer.files;if(files.length){fi2.files=files;onFile();}});
+fi2.addEventListener('change',onFile);
+function onFile(){var f=fi2.files[0];if(f&&f.name.endsWith('.xlsx')){document.getElementById('btn').style.display='block';document.getElementById('status').style.display='none';document.getElementById('summary').style.display='none';}}
+</script>
+</body>
+</html>
