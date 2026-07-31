@@ -6,7 +6,7 @@
 
 import openpyxl
 from openpyxl.utils import get_column_letter
-import os, sys
+import os, sys, re
 from datetime import datetime, date, timedelta
 from copy import copy
 import math
@@ -22,23 +22,23 @@ OUTPUT_DIR = None
 # Merchant billing file definitions
 # ============================================================
 MERCHANT_FILES = {
-    '爱康':     {'filename': '2026年爱康国宾16元做表我司收10元，现场优惠卷现场收10元1小时.xlsx',
-                  'title': '爱 康 国 宾 停 车 券 计 费 明 细 表', 'price': 16},
-    '爱康口腔': {'filename': '2026年爱康口腔16元做表我司收10元，现场优惠卷现场收10元1小时.xlsx',
+    '爱康':     {'filename': '爱康国宾10元.xlsx',
+                  'title': '爱 康 国 宾 停 车 券 计 费 明 细 表', 'price': 10},
+    '爱康口腔': {'filename': '爱康口腔16元.xlsx',
                   'title': '爱 康 口腔 停 车 券 计 费 明 细 表', 'price': 16},
-    '爱来':     {'filename': '2026年爱来整形美容5元.xlsx',
+    '爱来':     {'filename': '爱来整形美容5元.xlsx',
                   'title': '爱 来 美 容 院 停 车 券 计 费 明 细 表', 'price': 5},
-    '阿玛施':   {'filename': '2026年阿玛施眼科电子券5元.xlsx',
+    '阿玛施':   {'filename': '阿玛施眼科电子券5元.xlsx',
                   'title': '眼 科 停 车 券 计 费 明 细 表', 'price': 5},
-    '歌蕊':     {'filename': '2026年歌蕊医疗13元.xlsx',
+    '歌蕊':     {'filename': '歌蕊医疗13元.xlsx',
                   'title': '歌蕊医疗停车券计费明细表', 'price': 13},
-    '皆大欢洗':  {'filename': '2026年李利军3元.xlsx',
-                  'title': '皆大欢喜停车券计费明细表', 'price': 3},
-    '新奥美嘉':  {'filename': '2026年新奥美嘉10元.xlsx',
+    '皆大欢洗':  {'filename': '李利军3元.xlsx',
+                  'title': '李 利 军 停 车 券 计 费 明 细 表', 'price': 3},
+    '新奥美嘉':  {'filename': '新奥美嘉10元.xlsx',
                   'title': '新奥美嘉 停 车 券 计 费 明 细 表', 'price': 10},
-    '丝芭':     {'filename': '2026年丝芭16元.xlsx',
+    '丝芭':     {'filename': '丝芭16元.xlsx',
                   'title': '丝芭停 车 券 计 费 明 细 表', 'price': 16},
-    '精应':     {'filename': '2026年精应电子券4元.xlsx',
+    '精应':     {'filename': '精应电子券4元.xlsx',
                   'title': '精 应 停 车 券 计 费 明 细 表', 'price': 4},
 }
 
@@ -287,8 +287,12 @@ def step2_merchant_files(main_report_path, output_dir):
         # Remove default sheet
         out_wb.remove(out_wb.active)
 
-        # Create the month sheet
-        ws = out_wb.create_sheet(title='2026.4')
+        # Create the month sheet (name = ending month from period)
+        m = re.search(r'至\s*(\d{4})-(\d{1,2})', period_text)
+        if not m:
+            m = re.search(r'(\d{4})-(\d{1,2})', period_text)
+        sheet_name = f'{m.group(1)}.{int(m.group(2)):02d}' if m else 'Sheet1'
+        ws = out_wb.create_sheet(title=sheet_name)
         create_merchant_sheet(ws, data, cfg['title'], cfg['price'], period_text)
 
         out_path = os.path.join(output_dir, cfg['filename'])
@@ -383,14 +387,14 @@ def create_group_sheet(ws, wb, floor, account, period_text):
         ws.cell(row=r, column=2, value=v3)
         # C = B × 2
         ws.cell(row=r, column=3, value=v3 * 2)
-        ws.cell(row=r, column=3).number_format = '0'
+        ws.cell(row=r, column=3).number_format = '#,##0.00'
         ws.cell(row=r, column=4, value=v12)
         # E = D × 4
         ws.cell(row=r, column=5, value=v12 * 4)
-        ws.cell(row=r, column=5).number_format = '0'
+        ws.cell(row=r, column=5).number_format = '#,##0.00'
         # F = C + E
         ws.cell(row=r, column=6, value=v3 * 2 + v12 * 4)
-        ws.cell(row=r, column=6).number_format = '0'
+        ws.cell(row=r, column=6).number_format = '#,##0.00'
 
         total_3h += v3
         total_12h += v12
@@ -400,12 +404,12 @@ def create_group_sheet(ws, wb, floor, account, period_text):
     ws.cell(row=r, column=1, value='合计')
     ws.cell(row=r, column=2, value=total_3h)
     ws.cell(row=r, column=3, value=total_3h * 2)
-    ws.cell(row=r, column=3).number_format = '0'
+    ws.cell(row=r, column=3).number_format = '#,##0.00'
     ws.cell(row=r, column=4, value=total_12h)
     ws.cell(row=r, column=5, value=total_12h * 4)
-    ws.cell(row=r, column=5).number_format = '0'
+    ws.cell(row=r, column=5).number_format = '#,##0.00'
     ws.cell(row=r, column=6, value=total_3h * 2 + total_12h * 4)
-    ws.cell(row=r, column=6).number_format = '0'
+    ws.cell(row=r, column=6).number_format = '#,##0.00'
 
     # Column widths
     for col, w in [('A', 14), ('B', 16), ('C', 16), ('D', 16), ('E', 16), ('F', 12)]:
@@ -471,15 +475,15 @@ def create_jiuhao_sheet(ws, wb, period_text):
         ws.cell(row=r, column=3, value=c)
         # D = (B+C) × 2
         ws.cell(row=r, column=4, value=(b + c) * 2)
-        ws.cell(row=r, column=4).number_format = '0'
+        ws.cell(row=r, column=4).number_format = '#,##0.00'
         ws.cell(row=r, column=5, value=e)
         ws.cell(row=r, column=6, value=f)
         # G = (E+F) × 4
         ws.cell(row=r, column=7, value=(e + f) * 4)
-        ws.cell(row=r, column=7).number_format = '0'
+        ws.cell(row=r, column=7).number_format = '#,##0.00'
         # H = D + G
         ws.cell(row=r, column=8, value=(b + c) * 2 + (e + f) * 4)
-        ws.cell(row=r, column=8).number_format = '0'
+        ws.cell(row=r, column=8).number_format = '#,##0.00'
 
         total_b += b; total_c += c; total_e += e; total_f += f
         r += 1
@@ -489,13 +493,13 @@ def create_jiuhao_sheet(ws, wb, period_text):
     ws.cell(row=r, column=2, value=total_b)
     ws.cell(row=r, column=3, value=total_c)
     ws.cell(row=r, column=4, value=(total_b + total_c) * 2)
-    ws.cell(row=r, column=4).number_format = '0'
+    ws.cell(row=r, column=4).number_format = '#,##0.00'
     ws.cell(row=r, column=5, value=total_e)
     ws.cell(row=r, column=6, value=total_f)
     ws.cell(row=r, column=7, value=(total_e + total_f) * 4)
-    ws.cell(row=r, column=7).number_format = '0'
+    ws.cell(row=r, column=7).number_format = '#,##0.00'
     ws.cell(row=r, column=8, value=(total_b + total_c) * 2 + (total_e + total_f) * 4)
-    ws.cell(row=r, column=8).number_format = '0'
+    ws.cell(row=r, column=8).number_format = '#,##0.00'
 
     # Column widths
     for col, w in [('A', 14), ('B', 6), ('C', 6), ('D', 16), ('E', 6), ('F', 6), ('G', 16), ('H', 12)]:
@@ -550,7 +554,7 @@ def step4_chechang_report(main_report_path, vehicle_report_path, output_dir):
     # Define sheet mappings
     sheet_mappings = [
         ('物业', '天启来访停车卡', '集团来访停车卡明细表'),
-        ('精应', '附件七(哥弟公司来方停车卡)', '哥弟公司来访停车卡明细表'),
+        ('哥弟', '附件七(哥弟公司来方停车卡)', '哥弟公司来访停车卡明细表'),
         ('商管', '商业公司来访停车卡', '集团来访停车卡明细表'),
     ]
 
@@ -732,6 +736,7 @@ def create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title):
                         hours = int(diff_h)
                         free = (hours + 1) * 4
                         ws.cell(row=r, column=7, value=free)
+                        ws.cell(row=r, column=7).number_format = '#,##0.00'
                         total_free += free
                     except:
                         pass  # Leave blank if calculation fails
@@ -744,6 +749,7 @@ def create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title):
     # Total row
     ws.cell(row=r, column=1, value='合计')
     ws.cell(row=r, column=7, value=total_free)
+    ws.cell(row=r, column=7).number_format = '#,##0.00'
 
     # Column widths
     for col, w in [('A', 8), ('B', 14), ('C', 12), ('D', 14), ('E', 12), ('F', 14), ('G', 10), ('H', 10)]:

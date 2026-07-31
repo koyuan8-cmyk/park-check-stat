@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>停车票核销报表生成器 v3.0</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;background:#f0f2f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08);padding:40px;max-width:640px;width:100%}
+h1{font-size:22px;color:#1a1a1a;text-align:center;margin-bottom:4px}
+.sub{color:#888;font-size:13px;text-align:center;margin-bottom:28px}
+.upload-row{display:flex;gap:12px;margin-bottom:16px}
+.upload-box{flex:1;border:2px dashed #d0d5dd;border-radius:10px;padding:24px 12px;text-align:center;cursor:pointer;transition:all .2s}
+.upload-box:hover,.upload-box.has-file{border-color:#4f46e5;background:#f8f7ff}
+.upload-box .icon{font-size:28px;margin-bottom:6px}
+.upload-box .title{font-size:13px;color:#333;font-weight:600}
+.upload-box .hint{font-size:11px;color:#aaa;margin-top:3px}
+.upload-box .fn{font-size:11px;color:#4f46e5;margin-top:6px;display:none;word-break:break-all}
+.upload-box.has-file .fn{display:block}
+.upload-box input{display:none}
+.btn{width:100%;padding:13px;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;transition:all .2s;margin-top:4px}
+.btn-go{background:#4f46e5;color:#fff;display:none}
+.btn-go:hover{background:#4338ca}
+.btn-go:disabled{background:#a5b4fc;cursor:not-allowed}
+.status{margin-top:16px;padding:12px;border-radius:8px;font-size:13px;display:none;text-align:center}
+.status.ok{background:#f0fdf4;color:#166534;display:block}
+.status.err{background:#fef2f2;color:#991b1b;display:block}
+.status.info{background:#eff6ff;color:#1e40af;display:block}
+.spinner{display:inline-block;width:15px;height:15px;border:2px solid #a5b4fc;border-top-color:#4f46e5;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:7px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.summary{margin-top:14px;font-size:12px;color:#666;text-align:center;display:none;max-height:200px;overflow-y:auto}
+.summary table{width:100%;border-collapse:collapse}
+.summary td{padding:2px 6px;font-size:12px}
+.summary tr td:first-child{font-weight:600;color:#333}
+.footer{text-align:center;margin-top:20px;font-size:11px;color:#bbb}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>&#x1F17F;&#xFE0F; 停车票核销报表 v3.0</h1>
+<p class="sub">上传核销记录表 + 车辆进出报表 &#x2192; 一键生成 12 个文件</p>
+<div class="upload-row">
+<div class="upload-box" id="box1" onclick="document.getElementById('f1').click()">
+<div class="icon">&#x1F4CB;</div><div class="title">核销记录表</div>
+<div class="hint">含「停车票核销记录报表」</div>
+<div class="fn" id="nm1"></div><input type="file" id="f1" accept=".xlsx,.xls"/>
+</div>
+<div class="upload-box" id="box2" onclick="document.getElementById('f2').click()">
+<div class="icon">&#x1F698;</div><div class="title">车辆进出报表</div>
+<div class="hint">含「车辆进出报表」</div>
+<div class="fn" id="nm2"></div><input type="file" id="f2" accept=".xlsx,.xls"/>
+</div>
+</div>
+<button class="btn btn-go" id="btn" onclick="run()">&#x26A1; 一键生成全部报表</button>
+<div class="status" id="status"></div>
+<div class="summary" id="summary"></div>
+<div class="footer">停车票报表生成器 v3.0 · 纯浏览器运行，数据不上传服务器</div>
+</div>
+
+<script>
+var MAIN_SHEET='停车票核销记录报表',VEH_SHEET='车辆进出报表';
+var MERCHANT_KW={'爱康':'广州爱康国宾','爱康口腔':'爱康林和口腔','爱来':'爱来医疗美容','阿玛施':'阿玛施眼科','歌蕊':'歌蕊医疗','皆大欢洗':'皆大欢洗','新奥美嘉':'新奥美嘉医疗','丝芭':'丝芭文化','哥弟':'哥弟','精应':'__保留空表__','物业':'中泰物业来访','商管':'中泰商管来访'};
+var MERCHANT_FILES={'爱康':{fn:'爱康国宾10元.xlsx',title:'爱 康 国 宾 停 车 券 计 费 明 细 表',price:10},'爱康口腔':{fn:'爱康口腔16元.xlsx',title:'爱 康 口腔 停 车 券 计 费 明 细 表',price:16},'爱来':{fn:'爱来整形美容5元.xlsx',title:'爱 来 美 容 院 停 车 券 计 费 明 细 表',price:5},'阿玛施':{fn:'阿玛施眼科电子券5元.xlsx',title:'眼 科 停 车 券 计 费 明 细 表',price:5},'歌蕊':{fn:'歌蕊医疗13元.xlsx',title:'歌蕊医疗停车券计费明细表',price:13},'皆大欢洗':{fn:'李利军3元.xlsx',title:'李 利 军 停 车 券 计 费 明 细 表',price:3},'新奥美嘉':{fn:'新奥美嘉10元.xlsx',title:'新奥美嘉 停 车 券 计 费 明 细 表',price:10},'丝芭':{fn:'丝芭16元.xlsx',title:'丝芭停 车 券 计 费 明 细 表',price:16},'精应':{fn:'精应电子券4元.xlsx',title:'精 应 停 车 券 计 费 明 细 表',price:4}};
+var F6=new Set(['jhxg08','jhxg09','jhxg10']),F4=new Set(['jhxg','jhxg01','jhxg02','jhxg03','jhxg04','jhxg06']),F35=new Set(['jhxg11']),F46=new Set(['jhxg07']);
+var TIME_RANGES={'3小时':[1,3],'12小时':[4,12],'24小时':[13,24],'大于一天':[25,9999]};
+var SHEET_ORDER=['停车票核销记录报表','爱康','爱康口腔','爱来','阿玛施','歌蕊','皆大欢洗','新奥美嘉','丝芭','哥弟','精应','物业','商管','集团','35楼3小时','35楼12小时','35楼24小时','46楼3小时','46楼12小时','46楼24小时','九号','九号6楼','6楼3小时','6楼12小时','6楼24小时','6楼大于一天','九号4楼','4楼3小时','4楼12小时','4楼24小时','4楼大于一天'];
+var HEADERS=['车场','停','车票名称','商家名称','发放时间','A','领取车牌','发放账号','状态'];
+var COL='ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+
+// ==== HELPERS ====
+function dcpy(o){return JSON.parse(JSON.stringify(o));}
+function scell(ws,c,r,style){var ref=COL[c]+(r+1);if(!ws[ref])ws[ref]={v:null};ws[ref].s=dcpy(style);}
+function byKW(rows,kw){return rows.filter(function(r){return r[3]&&String(r[3]).indexOf(kw)>=0;});}
+function byAcct(rows,accts){return rows.filter(function(r){return accts.has(String(r[7]||''));});}
+function byHours(rows,min,max){return rows.filter(function(r){var v=Number(r[1]);return !isNaN(v)&&v>=min&&v<=max;});}
+function ton(v){if(v==null||v==='')return NaN;if(typeof v==='number')return v;return Number(v);}
+function rnd(v,d){if(v==null||v===''||isNaN(Number(v)))return'';return Number(Number(v).toFixed(d||2));}
+function dOnly(v){
+  if(!v) return new Date(NaN);
+  if(v instanceof Date) return new Date(v.getFullYear(),v.getMonth(),v.getDate());
+  if(typeof v==='number') return new Date(Math.round((v-25569)*86400*1000));
+  var m=String(v).trim().match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if(m) return new Date(parseInt(m[1]),parseInt(m[2])-1,parseInt(m[3]));
+  var d=new Date(v);return isNaN(d.getTime())?new Date(NaN):new Date(d.getFullYear(),d.getMonth(),d.getDate());
+}
+function dStr(d){
+  if(!d) return '';if(typeof d==='string'){var p=dOnly(d);if(!isNaN(p.getTime()))d=p;else return d;}
+  if(typeof d==='number') d=dOnly(d);
+  if(!(d instanceof Date)||isNaN(d.getTime())) return String(d);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function tStr(v){
+  if(v==null||v==='')return'';
+  if(v instanceof Date&&!isNaN(v.getTime()))
+    return [v.getHours(),v.getMinutes(),v.getSeconds()].map(function(x){return String(x).padStart(2,'0');}).join(':');
+  if(typeof v==='number'&&v>0&&v<1){var sec=Math.round(v*86400);return [Math.floor(sec/3600),Math.floor((sec%3600)/60),sec%60].map(function(x){return String(x).padStart(2,'0');}).join(':');}
+  return String(v).replace(/\.0$/,'');
+}
+function normRow(r){
+  var out=r.slice(0,9);
+  var bv=ton(out[1]);if(!isNaN(bv))out[1]=bv;
+  // E=发放时间: Date → string (consistent with pivot L-M area)
+  if(out[4]!=null&&out[4] instanceof Date&&!isNaN(out[4].getTime()))out[4]=dStr(out[4]);
+  else if(out[4]!=null&&!(out[4] instanceof Date)){var d4=dOnly(out[4]);if(!isNaN(d4.getTime()))out[4]=dStr(d4);}
+  // F=A: time value → time string
+  if(out[5]!=null)out[5]=tStr(out[5]);
+  return out;
+}
+
+// ==== PIVOT ====
+function buildPivot(rows,valIdx){
+  var groups=new Map(),total=0;
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i],val=ton(r[valIdx]);if(isNaN(val))continue;
+    total+=val;var d=r[4]?dOnly(r[4]):null;
+    var key=d&&!isNaN(d.getTime())?d.getTime():'blank';
+    groups.set(key,(groups.get(key)||0)+val);
+  }
+  var entries=[];groups.forEach(function(v,k){if(k!=='blank')entries.push([dStr(new Date(k)),v]);});
+  entries.sort(function(a,b){return a[0]<b[0]?-1:a[0]>b[0]?1:0;});
+  return {entries:entries,total:rnd(total,2)};
+}
+
+// ==== STYLES ====
+var B_THIN={top:{style:'thin',color:{rgb:'B0B0B0'}},bottom:{style:'thin',color:{rgb:'B0B0B0'}},left:{style:'thin',color:{rgb:'B0B0B0'}},right:{style:'thin',color:{rgb:'B0B0B0'}}};
+var B_HDR={top:{style:'thin',color:{rgb:'1A4472'}},bottom:{style:'medium',color:{rgb:'1A4472'}},left:{style:'thin',color:{rgb:'1A4472'}},right:{style:'thin',color:{rgb:'1A4472'}}};
+var B_TTL={top:{style:'medium',color:{rgb:'2B579A'}},bottom:{style:'double',color:{rgb:'2B579A'}},left:{style:'thin',color:{rgb:'B0B0B0'}},right:{style:'thin',color:{rgb:'B0B0B0'}}};
+var B_MED_TOP={top:{style:'medium',color:{rgb:'333333'}},bottom:{style:'thin',color:{rgb:'B0B0B0'}},left:{style:'thin',color:{rgb:'B0B0B0'}},right:{style:'thin',color:{rgb:'B0B0B0'}}};
+var S_HDR={font:{bold:true,sz:11,name:'微软雅黑',color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'2B579A'}},alignment:{horizontal:'center',vertical:'center',wrapText:true},border:B_HDR};
+var S_R1={font:{sz:10.5,name:'微软雅黑',color:{rgb:'333333'}},fill:{fgColor:{rgb:'FFFFFF'}},alignment:{vertical:'center',wrapText:true},border:B_THIN};
+var S_R2={font:{sz:10.5,name:'微软雅黑',color:{rgb:'333333'}},fill:{fgColor:{rgb:'F2F6FC'}},alignment:{vertical:'center',wrapText:true},border:B_THIN};
+var S_PV1={font:{sz:10.5,name:'微软雅黑',color:{rgb:'333333'}},fill:{fgColor:{rgb:'FFFFFF'}},alignment:{horizontal:'center',vertical:'center'},border:B_THIN};
+var S_PV2={font:{sz:10.5,name:'微软雅黑',color:{rgb:'333333'}},fill:{fgColor:{rgb:'F2F6FC'}},alignment:{horizontal:'center',vertical:'center'},border:B_THIN};
+var S_TTL={font:{bold:true,sz:11,name:'微软雅黑',color:{rgb:'1A4472'}},fill:{fgColor:{rgb:'D6E4F0'}},alignment:{vertical:'center',horizontal:'center'},border:B_TTL};
+// Merchant
+var SM_TITLE={font:{bold:true,sz:16,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'}};
+var SM_PERIOD={font:{sz:10,name:'微软雅黑',color:{rgb:'666666'}},alignment:{horizontal:'center',vertical:'center'}};
+var SM_HDR={font:{bold:true,sz:10,name:'微软雅黑'},fill:{fgColor:{rgb:'F2F2F2'}},alignment:{horizontal:'center',vertical:'center'},border:B_THIN};
+var SM_CELL={font:{sz:10,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_THIN};
+var SM_TOTAL={font:{bold:true,sz:11,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_MED_TOP};
+// 车场报表
+var SC_HDR={font:{bold:true,sz:10,name:'微软雅黑',color:{rgb:'1A4472'}},fill:{fgColor:{rgb:'D6E4F0'}},alignment:{horizontal:'center',vertical:'center'},border:B_THIN};
+var SC_CELL={font:{sz:10,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_THIN};
+var SC_TOTAL={font:{bold:true,sz:11,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_MED_TOP};
+// 集团/九号
+var SJ_HDR={font:{bold:true,sz:10,name:'微软雅黑',color:{rgb:'1A4472'}},fill:{fgColor:{rgb:'D6E4F0'}},alignment:{horizontal:'center',vertical:'center'},border:B_THIN};
+var SJ_CELL={font:{sz:10,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_THIN};
+var SJ_TOTAL={font:{bold:true,sz:11,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_MED_TOP};
+var SM_CELL_MONEY={font:{sz:10,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_THIN,numberFormat:'#,##0.00'};
+var SJ_CELL_MONEY={font:{sz:10,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_THIN,numberFormat:'#,##0.00'};
+var SJ_TOTAL_MONEY={font:{bold:true,sz:11,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_MED_TOP,numberFormat:'#,##0.00'};
+var SC_CELL_MONEY={font:{sz:10,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_THIN,numberFormat:'#,##0.00'};
+var SC_TOTAL_MONEY={font:{bold:true,sz:11,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_MED_TOP,numberFormat:'#,##0.00'};
+
+function formatSheet(ws,opts){
+  var nc=opts.numCols,w=opts.widths,de=opts.dataEndRow,pe=opts.pivotEndRow,tr=opts.totalRow;
+  ws['!cols']=[];for(var i=0;i<nc;i++)ws['!cols'].push({wch:w[i]||12});
+  ws['!rows']=[];ws['!rows'][0]={hpt:30};
+  for(var c=0;c<nc;c++){if(c<=8||c>=11)scell(ws,c,0,S_HDR);}
+  var lastR=Math.max(de,pe!=null?pe:0,tr!=null?tr:0);
+  for(var r=1;r<=lastR;r++){
+    ws['!rows'][r]={hpt:18};
+    if(r<=de){var sA=(r%2===1)?S_R1:S_R2;for(var cA=0;cA<=8;cA++)scell(ws,cA,r,sA);}
+    if(pe!=null&&r<=pe){var sL=(r%2===1)?S_PV1:S_PV2;for(var cL=11;cL<nc;cL++)scell(ws,cL,r,sL);}
+    if(tr!=null&&r===tr){for(var cT=11;cT<nc;cT++)scell(ws,cT,r,S_TTL);ws['!rows'][r]={hpt:28};}
+  }
+}
+
+// ==== BUILDERS ====
+function buildDataOnly(data){
+  var s=[];s.push(HEADERS.slice());
+  for(var i=0;i<data.length;i++)s.push(normRow(data[i]));
+  return {data:s,dataEndRow:data.length,pivotEndRow:null,totalRow:null};
+}
+
+function buildMerchant(data,pivot,label){
+  var s=[],ps=11,nc=ps+2,hdr=HEADERS.slice();
+  while(hdr.length<ps)hdr.push('');hdr.push('日期',label);s.push(hdr);
+  var pe=pivot.entries.length,maxRows=Math.max(data.length,pe+1);
+  for(var i=0;i<maxRows;i++){
+    var row=[];if(i<data.length)row.push.apply(row,normRow(data[i]));while(row.length<ps)row.push('');
+    if(i<pe)row.push(pivot.entries[i][0],pivot.entries[i][1]);
+    else if(i===pe)row.push('合计',pivot.total);
+    while(row.length<nc)row.push('');s.push(row);
+  }
+  return {data:s,dataEndRow:data.length,pivotEndRow:pe,totalRow:pe+1};
+}
+
+function buildTime3Or24(data,bVal,label){
+  var s=[],ps=11,nc=ps+2,hdrs=HEADERS.concat(['B']),hdr=hdrs.slice();
+  while(hdr.length<ps)hdr.push('');hdr.push('日期',label);s.push(hdr);
+  var enriched=[];for(var i=0;i<data.length;i++)enriched.push(normRow(data[i]).concat([bVal]));
+  var pivot=buildPivot(enriched,9),pe=pivot.entries.length;
+  var maxRows=Math.max(data.length,pe+1);
+  for(var i2=0;i2<maxRows;i2++){
+    var row=[];if(i2<data.length)row.push.apply(row,enriched[i2]);while(row.length<ps)row.push('');
+    if(i2<pe)row.push(pivot.entries[i2][0],pivot.entries[i2][1]);
+    else if(i2===pe)row.push('合计',pivot.total);
+    while(row.length<nc)row.push('');s.push(row);
+  }
+  return {data:s,dataEndRow:data.length,pivotEndRow:pe,totalRow:pe+1};
+}
+
+function buildTimeOverNoPivot(data){
+  // 大于一天: data columns + B + 张 only, NO L-M analysis
+  var nc=11; // A-K (9 headers + B + 张)
+  var hdrs=HEADERS.concat(['B','张']),s=[hdrs.slice()];
+  for(var i=0;i<data.length;i++){
+    var r=normRow(data[i]),ting=ton(r[1])||0;
+    s.push(r.concat([rnd(ting/12,2),Math.ceil(ting/12)]));
+  }
+  return {data:s,dataEndRow:data.length,pivotEndRow:null,totalRow:null};
+}
+
+function buildTime12(data,floorName,timeData){
+  var s24=floorName+'24小时',sOver=floorName+'大于一天',d24=timeData[s24]||[],dOver=timeData[sOver]||[];
+  var e12=[];for(var i=0;i<data.length;i++)e12.push(normRow(data[i]).concat([1]));
+  var e24=[];for(var i2=0;i2<d24.length;i2++)e24.push(normRow(d24[i2]).concat([2]));
+  var eOz=[];for(var i3=0;i3<dOver.length;i3++){var r3=normRow(dOver[i3]),t3=ton(r3[1])||0;eOz.push(r3.concat([rnd(t3/12,2),Math.ceil(t3/12)]));}
+  var p12=buildPivot(e12,9),p24=buildPivot(e24,9),pOz=buildPivot(eOz,10);
+  var dateMap={};
+  [{l:'12h',d:p12.entries},{l:'24h',d:p24.entries},{l:'oz',d:pOz.entries}].forEach(function(p){
+    for(var i4=0;i4<p.d.length;i4++){var dk=p.d[i4][0]||'(空白)',dv=p.d[i4][1];if(!dateMap[dk])dateMap[dk]={};dateMap[dk][p.l]=dv;}
+  });
+  var sd=Object.keys(dateMap).filter(function(k){return k!=='(空白)';}).sort();
+  if(dateMap['(空白)'])sd.push('(空白)');
+  var sheet=[],as=11,ah=['日期','12小时B','24小时B','大于一天张','合计'],nc=as+ah.length;
+  var hdr=HEADERS.concat(['B']);while(hdr.length<as)hdr.push('');hdr.push.apply(hdr,ah);sheet.push(hdr);
+  var s12=0,s24c=0,sO2=0,sHj=0,pe=sd.length;
+  var maxRows=Math.max(data.length,pe+1);
+  for(var i5=0;i5<maxRows;i5++){
+    var row=[];if(i5<data.length)row.push.apply(row,e12[i5]);while(row.length<as)row.push('');
+    if(i5<pe){var dd=sd[i5],vals=dateMap[dd]||{},v12=vals['12h']||0,v24=vals['24h']||0,voz=vals['oz']||0,vhj=v12+v24+voz;s12+=v12;s24c+=v24;sO2+=voz;sHj+=vhj;row.push(dd,v12,v24,voz,vhj);}
+    else if(i5===pe){row.push('合计',s12,s24c,sO2,sHj);}
+    while(row.length<nc)row.push('');sheet.push(row);
+  }
+  return {data:sheet,dataEndRow:data.length,pivotEndRow:pe,totalRow:pe+1};
+}
+
+// ==== STEP 1: MAIN REPORT ====
+function step1_mainReport(rows){
+  var md={};Object.keys(MERCHANT_KW).forEach(function(n){md[n]=byKW(rows,MERCHANT_KW[n]);});
+  var jAll=byKW(rows,'九号行馆'),j6f=byAcct(jAll,F6),j4f=byAcct(jAll,F4),j35f=byAcct(jAll,F35),j46f=byAcct(jAll,F46);
+  var jGroup=j35f.concat(j46f),jJiuhao=jAll.filter(function(r){return !F35.has(String(r[7]||''))&&!F46.has(String(r[7]||''));});
+  var fm={'6楼':j6f,'4楼':j4f,'35楼':j35f,'46楼':j46f},td={};
+  Object.keys(fm).forEach(function(fn){Object.keys(TIME_RANGES).forEach(function(tk){td[fn+tk]=byHours(fm[fn],TIME_RANGES[tk][0],TIME_RANGES[tk][1]);});});
+
+  var wb=XLSX.utils.book_new(),sum={},STDW=[14,8,18,24,16,8,14,16,10];
+  SHEET_ORDER.forEach(function(sn){
+    var result,widths;
+    if(sn===MAIN_SHEET){result=buildDataOnly(rows);widths=STDW.slice();sum[sn]=rows.length;}
+    else if(sn in MERCHANT_KW){var d=md[sn];result=buildMerchant(d,buildPivot(d,1),'求和项:停');widths=STDW.concat([12,12,14,14]);sum[sn]=d.length;}
+    else if(sn==='集团'){result=buildMerchant(jGroup,buildPivot(jGroup,1),'求和项:停');widths=STDW.concat([12,12,14,14]);sum[sn]=jGroup.length;}
+    else if(sn==='九号'){result=buildDataOnly(jJiuhao);widths=STDW.slice();sum[sn]=jJiuhao.length;}
+    else if(sn==='九号6楼'){result=buildDataOnly(j6f);widths=STDW.slice();sum[sn]=j6f.length;}
+    else if(sn==='九号4楼'){result=buildDataOnly(j4f);widths=STDW.slice();sum[sn]=j4f.length;}
+    else if(sn==='6楼大于一天'||sn==='4楼大于一天'){var dO2=td[sn]||[];result=buildTimeOverNoPivot(dO2);widths=STDW.concat([8,6]);sum[sn]=dO2.length;}
+    else if(sn.indexOf('3小时')>=0){var d3=td[sn]||[];result=buildTime3Or24(d3,1,'求和项:B');widths=STDW.concat([8,12,14,14]);sum[sn]=d3.length;}
+    else if(sn.indexOf('24小时')>=0){var d24=td[sn]||[];result=buildTime3Or24(d24,2,'求和项:B');widths=STDW.concat([8,12,14,14]);sum[sn]=d24.length;}
+    else if(sn.indexOf('大于一天')>=0){var dO=td[sn]||[];result=buildTime3Or24(dO,1,'求和项:B');widths=STDW.concat([8,12,14,14]);sum[sn]=dO.length;}
+    else{var d12=td[sn]||[];result=buildTime12(d12,sn.replace('12小时',''),td);widths=STDW.concat([8,12,14,14,14,14,12]);sum[sn]=d12.length;}
+    var ws=XLSX.utils.aoa_to_sheet(result.data);
+    formatSheet(ws,{numCols:widths.length,widths:widths,dataEndRow:result.dataEndRow,pivotEndRow:result.pivotEndRow,totalRow:result.totalRow});
+    XLSX.utils.book_append_sheet(wb,ws,sn);
+  });
+  return {wb:wb,sum:sum};
+}
+
+// ==== READ PIVOT FROM IN-MEMORY SHEET ====
+function readPivotLM(ws){
+  if(!ws||!ws['!ref'])return[];var ref=XLSX.utils.decode_range(ws['!ref']),data=[];
+  for(var r=1;r<=ref.e.r;r++){
+    var lc=ws[COL[11]+(r+1)],vc=ws[COL[12]+(r+1)];
+    if(!lc||!vc||lc.v==null||lc.v===undefined)continue;
+    var label=String(lc.v);
+    if(label==='总计'||label==='合计'||label==='(空白)'||label==='发放时间'||label==='日期'||label==='求和项:停'||label==='求和项:B'||label==='')continue;
+    var val=ton(vc.v);if(isNaN(val)||val===0)continue;
+    data.push({date:label,qty:Math.round(val)});
+  }
+  return data;
+}
+function read12hTotal(ws){
+  if(!ws||!ws['!ref'])return[];var ref=XLSX.utils.decode_range(ws['!ref']),data=[];
+  for(var r=1;r<=ref.e.r;r++){
+    var lc=ws[COL[11]+(r+1)],pc=ws[COL[15]+(r+1)];
+    if(!lc||!pc||lc.v==null||lc.v===undefined)continue;
+    var label=String(lc.v);
+    if(label==='日期'||label==='总计'||label==='合计'||label==='')continue;
+    var val=ton(pc.v);if(isNaN(val))continue;
+    data.push({date:label,total:Math.round(val)});
+  }
+  return data;
+}
+
+// ==== STEP 2: MERCHANT FILES ====
+function step2_merchantFiles(mainWB,period){
+  var files=[];
+  Object.keys(MERCHANT_FILES).forEach(function(sn){
+    var cfg=MERCHANT_FILES[sn],ws=mainWB.Sheets[sn];if(!ws)return;
+    var data=readPivotLM(ws);if(data.length===0)return;
+
+    var wb=XLSX.utils.book_new(),rows=[['','','',''],[cfg.title,'','',''],[period,'','',''],['类型','日期','一小时（张）','金额（'+cfg.price+'元/张）']];
+    var tQty=0;data.forEach(function(d){var amt=d.qty*cfg.price;rows.push(['电子劵',d.date,d.qty,amt]);tQty+=d.qty;});
+    rows.push(['合计','',tQty,tQty*cfg.price]);
+    var ws2=XLSX.utils.aoa_to_sheet(rows),lastData=4+data.length;
+    ws2['!merges']=[{s:{r:1,c:0},e:{r:1,c:3}},{s:{r:2,c:0},e:{r:2,c:3}},{s:{r:4,c:0},e:{r:lastData-1,c:0}},{s:{r:lastData,c:0},e:{r:lastData,c:1}}];
+    ws2['!cols']=[{wch:18},{wch:18},{wch:18},{wch:19}];
+    ws2['!rows']=[{},{hpt:38},{hpt:24},{hpt:30}];
+    scell(ws2,0,1,SM_TITLE);scell(ws2,0,2,SM_PERIOD);
+    for(var c=0;c<4;c++)scell(ws2,c,3,SM_HDR);
+    for(var i2=4;i2<lastData;i2++){for(var c2=0;c2<4;c2++)scell(ws2,c2,i2,c2===3?SM_CELL_MONEY:SM_CELL);ws2[COL[3]+(i2+1)].z='#,##0.00';}
+    for(var c3=0;c3<4;c3++)scell(ws2,c3,lastData,c3===3?{font:{bold:true,sz:11,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'},border:B_MED_TOP}:SM_TOTAL);
+    ws2[COL[3]+(lastData+1)].z='#,##0.00';
+    ws2['!rows'][lastData]={hpt:26};
+    var sm=period.match(/至\s*(\d{4})-(\d{1,2})-/)||period.match(/^(\d{4})-(\d{1,2})-/);var sheetName=sm?sm[1]+'.'+String(sm[2]).padStart(2,'0'):'Sheet1';
+    XLSX.utils.book_append_sheet(wb,ws2,sheetName);
+    files.push({name:cfg.fn,data:XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true})});
+  });
+  return files;
+}
+
+// ==== STEP 3: 集团/九号 ====
+function step3_jituanReport(mainWB,period){
+  var wb=XLSX.utils.book_new();
+
+  function get3hMap(sn){var ws=mainWB.Sheets[sn];if(!ws)return new Map();var m=new Map(),data=readPivotLM(ws);data.forEach(function(d){m.set(d.date,d.qty);});return m;}
+  function get12hMap(sn){var ws=mainWB.Sheets[sn];if(!ws)return new Map();var m=new Map(),data=read12hTotal(ws);data.forEach(function(d){m.set(d.date,d.total);});return m;}
+
+  function buildGroup(floor,acct){
+    var d3=get3hMap(floor+'楼3小时'),d12=get12hMap(floor+'楼12小时');
+    var allD=Array.from(new Set([...d3.keys(),...d12.keys()])).sort();
+    var rows=[['','','','','',''],[],[period,'','','','',''],['日期','三小时（张）','金额（2元/张）','十二小时（张）','金额（4元/张）','合计']];
+    rows[1]=['集 团 '+acct+' 账 号 免 费 停 车 数 据（电子）','','','','',''];
+    var t3=0,t12=0;
+    allD.forEach(function(d){var v3=d3.get(d)||0,v12=d12.get(d)||0;rows.push([d,v3,v3*2,v12,v12*4,v3*2+v12*4]);t3+=v3;t12+=v12;});
+    rows.push(['合计',t3,t3*2,t12,t12*4,t3*2+t12*4]);
+    var ws=XLSX.utils.aoa_to_sheet(rows),nc=6,hdrR=3,dataStart=4,dataEnd=3+allD.length,totalR=dataEnd+1;
+    ws['!cols']=[{wch:14},{wch:16},{wch:16},{wch:16},{wch:16},{wch:12}];
+    ws['!rows']=[];ws['!rows'][0]={};ws['!rows'][1]={hpt:32};ws['!rows'][2]={hpt:20};ws['!rows'][hdrR]={hpt:26};
+    // Merge title + period across all columns
+    ws['!merges']=[{s:{r:1,c:0},e:{r:1,c:nc-1}},{s:{r:2,c:0},e:{r:2,c:nc-1}}];
+    // Header
+    for(var c=0;c<nc;c++)scell(ws,c,hdrR,SJ_HDR);
+    // Data rows
+    for(var r=dataStart;r<=dataEnd;r++){for(var c2=0;c2<nc;c2++){scell(ws,c2,r,c2===2||c2===4||c2===5?SJ_CELL_MONEY:SJ_CELL);if(c2===2||c2===4||c2===5)ws[COL[c2]+(r+1)].z='#,##0.00';}}
+    // Total row
+    for(var c3=0;c3<nc;c3++){scell(ws,c3,totalR,c3===2||c3===4||c3===5?SJ_TOTAL_MONEY:SJ_TOTAL);if(c3===2||c3===4||c3===5)ws[COL[c3]+(totalR+1)].z='#,##0.00';}
+    ws['!rows'][totalR]={hpt:24};
+    // Title
+    scell(ws,0,1,{font:{bold:true,sz:14,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'}});
+    scell(ws,0,2,{font:{sz:10,name:'微软雅黑',color:{rgb:'666666'}},alignment:{horizontal:'center',vertical:'center'}});
+    return ws;
+  }
+
+  XLSX.utils.book_append_sheet(wb,buildGroup('35','011'),'35楼集团011');
+  XLSX.utils.book_append_sheet(wb,buildGroup('46','007'),'46楼集团007');
+
+  // 九号电子劵
+  var d4f3=get3hMap('4楼3小时'),d6f3=get3hMap('6楼3小时'),d4f12=get12hMap('4楼12小时'),d6f12=get12hMap('6楼12小时');
+  var allD9=Array.from(new Set([...d4f3.keys(),...d6f3.keys(),...d4f12.keys(),...d6f12.keys()])).sort();
+  var rows9=[['','','','','','','',''],['九 号 行 馆 停 车 券 计 费 明 细 表（电子）','','','','','','',''],[period,'','','','','','',''],['日期','≤三小时（张）','','金额（2元/张）','＞三小时（张）','','金额（4元/张）','合计'],['','4F','6F','','4F','6F','','']];
+  var tb_=0,tc_=0,te_=0,tf_=0,hdrR9=3,subHdrR=4,dataStart9=5,dataEnd9=4+allD9.length,totalR9=dataEnd9+1;
+  allD9.forEach(function(d){var b=d4f3.get(d)||0,c=d6f3.get(d)||0,e=d4f12.get(d)||0,f=d6f12.get(d)||0;rows9.push([d,b,c,(b+c)*2,e,f,(e+f)*4,(b+c)*2+(e+f)*4]);tb_+=b;tc_+=c;te_+=e;tf_+=f;});
+  rows9.push(['合计',tb_,tc_,(tb_+tc_)*2,te_,tf_,(te_+tf_)*4,(tb_+tc_)*2+(te_+tf_)*4]);
+  var ws9=XLSX.utils.aoa_to_sheet(rows9),nc9=8;
+  ws9['!cols']=[{wch:14},{wch:6},{wch:6},{wch:16},{wch:6},{wch:6},{wch:16},{wch:12}];
+  ws9['!rows']=[];ws9['!rows'][0]={};ws9['!rows'][1]={hpt:32};ws9['!rows'][2]={hpt:20};ws9['!rows'][hdrR9]={hpt:26};ws9['!rows'][subHdrR]={hpt:20};
+  // Merge title + period across all 8 columns
+  ws9['!merges']=[{s:{r:1,c:0},e:{r:1,c:nc9-1}},{s:{r:2,c:0},e:{r:2,c:nc9-1}},{s:{r:3,c:1},e:{r:3,c:2}},{s:{r:3,c:4},e:{r:3,c:5}}];
+  for(var cc=0;cc<nc9;cc++){scell(ws9,cc,hdrR9,SJ_HDR);scell(ws9,cc,subHdrR,SJ_HDR);}
+  for(var r9=dataStart9;r9<=dataEnd9;r9++){for(var cc2=0;cc2<nc9;cc2++){scell(ws9,cc2,r9,cc2===3||cc2===6||cc2===7?SJ_CELL_MONEY:SJ_CELL);if(cc2===3||cc2===6||cc2===7)ws9[COL[cc2]+(r9+1)].z='#,##0.00';}}
+  for(var cc3=0;cc3<nc9;cc3++){scell(ws9,cc3,totalR9,cc3===3||cc3===6||cc3===7?SJ_TOTAL_MONEY:SJ_TOTAL);if(cc3===3||cc3===6||cc3===7)ws9[COL[cc3]+(totalR9+1)].z='#,##0.00';}
+  ws9['!rows'][totalR9]={hpt:24};
+  scell(ws9,0,1,{font:{bold:true,sz:14,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'}});
+  scell(ws9,0,2,{font:{sz:10,name:'微软雅黑',color:{rgb:'666666'}},alignment:{horizontal:'center',vertical:'center'}});
+  XLSX.utils.book_append_sheet(wb,ws9,'九号电子劵');
+
+  return {name:'集团、九号车场电子券报表.xlsx',data:XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true})};
+}
+
+// ==== STEP 4: 车场报表 ====
+function step4_chechangReport(mainWB,vehRows){
+  // Build vehicle lookup: plate|date -> {entryDate,entryTime,exitDate,exitTime}
+  var vehMap=new Map();
+  vehRows.forEach(function(r){
+    if(!r||!r[1])return;var plate=String(r[1]).trim();if(!plate)return;
+    var ed=dOnly(r[2]);if(isNaN(ed.getTime()))return;
+    var key=plate+'|'+dStr(ed);
+    if(!vehMap.has(key)){
+      var xd=r[4];if(xd&&String(xd)==='null')xd=null;
+      var xt=r[5];if(xt&&String(xt)==='null')xt=null;
+      vehMap.set(key,{entryDate:ed,entryTime:r[3],exitDate:xd,exitTime:xt});
+    }
+  });
+
+  var MAPS=[['物业','天启来访停车卡','集团来访停车卡明细表'],['哥弟','附件七(哥弟公司来方停车卡)','哥弟公司来访停车卡明细表'],['商管','商业公司来访停车卡','商业公司来访停车卡明细表']];
+  var wb=XLSX.utils.book_new();
+
+  MAPS.forEach(function(map){
+    var sub=map[0],sn=map[1],title=map[2],subWs=mainWB.Sheets[sub];if(!subWs)return;
+    var recs=[],ref=XLSX.utils.decode_range(subWs['!ref']);
+    for(var r=1;r<=ref.e.r;r++){
+      var pc=subWs[COL[6]+(r+1)];if(!pc||!pc.v)continue;var plate=String(pc.v).trim();if(!plate||plate==='领取车牌')continue;
+      var dc=subWs[COL[4]+(r+1)];if(!dc||!dc.v)continue;var dd=dOnly(dc.v);if(!isNaN(dd.getTime()))recs.push({plate:plate,date:dd});
+    }
+    if(recs.length===0)return;
+    var pd=recs[0].date;recs.forEach(function(x){if(x.date<pd)pd=x.date;});
+    var monthText=pd.getFullYear()+'年'+(pd.getMonth()+1)+'月'; var rows=[["","","","","","","",""],[title,"","","","","","","",""],[monthText,"","","","","","",""],["序号","进场日期","进场时间","出场日期","出场时间","车牌号码","免费额","备注"]];
+    var totalFree=0;
+    recs.forEach(function(rec,i){
+      var key=rec.plate+'|'+dStr(rec.date),veh=vehMap.get(key);
+      // Fallback: try ±1 day
+      if(!veh){
+        var d0=new Date(rec.date);
+        for(var off=-1;off<=1&&!veh;off+=2){
+          var d1=new Date(d0);d1.setDate(d1.getDate()+off);
+          veh=vehMap.get(rec.plate+'|'+dStr(d1));
+        }
+      }
+      var enD='',enT='',exD='',exT='',free='';
+      if(veh){
+        enD=dStr(veh.entryDate);enT=tStr(veh.entryTime);
+        if(veh.exitDate&&veh.exitDate!=null&&String(veh.exitDate)!=='null'&&String(veh.exitDate)!=='None')exD=dStr(veh.exitDate);
+        if(veh.exitTime&&veh.exitTime!=null&&String(veh.exitTime)!=='null'&&String(veh.exitTime)!=='None')exT=tStr(veh.exitTime);
+        if(enD&&exD&&enT&&exT&&enD===exD){
+          var ep=String(enT).split(':').map(Number),xp=String(exT).split(':').map(Number);
+          if(ep.length>=2&&xp.length>=2&&!isNaN(ep[0])&&!isNaN(xp[0])){
+            var eh=ep[0]+ep[1]/60+(ep[2]||0)/3600,xh=xp[0]+xp[1]/60+(xp[2]||0)/3600,df=xh-eh;if(df<0)df+=24;
+            free=(Math.floor(df)+1)*4;if(free>0)totalFree+=free;
+          }
+        }
+      }else{enD=dStr(rec.date);}
+      rows.push([i+1,enD,enT,exD,exT,rec.plate,free,'']);
+    });
+    rows.push(['合计','','','','','',totalFree||0,'']);
+
+    var ws=XLSX.utils.aoa_to_sheet(rows);
+    var ncc=8,dataStartC=4,dataEndC=3+recs.length,totalRC=dataEndC+1;
+    ws['!cols']=[{wch:8},{wch:14},{wch:12},{wch:14},{wch:12},{wch:14},{wch:10},{wch:10}];
+    ws['!rows']=[];ws['!rows'][0]={};ws['!rows'][1]={hpt:32};ws['!rows'][2]={hpt:20};ws['!rows'][3]={hpt:26};
+    // Title merge across all columns
+    ws['!merges']=[{s:{r:1,c:0},e:{r:1,c:7}},{s:{r:2,c:0},e:{r:2,c:7}}];
+    for(var cc=0;cc<ncc;cc++)scell(ws,cc,3,SC_HDR);
+    for(var rc=dataStartC;rc<=dataEndC;rc++){for(var cc2=0;cc2<ncc;cc2++){scell(ws,cc2,rc,cc2===6?SC_CELL_MONEY:SC_CELL);if(cc2===6)ws[COL[6]+(rc+1)].z='#,##0.00';}}
+    for(var cc3=0;cc3<ncc;cc3++){scell(ws,cc3,totalRC,cc3===6?SC_TOTAL_MONEY:SC_TOTAL);if(cc3===6)ws[COL[6]+(totalRC+1)].z='#,##0.00';}
+    ws['!rows'][totalRC]={hpt:24};
+    scell(ws,0,1,{font:{bold:true,sz:14,name:'微软雅黑'},alignment:{horizontal:'center',vertical:'center'}});
+    scell(ws,0,2,{font:{sz:10,name:'微软雅黑',color:{rgb:'666666'}},alignment:{horizontal:'center',vertical:'center'}});
+    XLSX.utils.book_append_sheet(wb,ws,sn);
+  });
+  return {name:'车场报表(物业、集团、哥弟来访条).xlsx',data:XLSX.write(wb,{bookType:'xlsx',type:'array',cellStyles:true})};
+}
+
+// ==== MAIN FLOW ====
+function run(){
+  var f1=document.getElementById('f1').files[0],f2=document.getElementById('f2').files[0];if(!f1||!f2)return;
+  var btn=document.getElementById('btn'),st=document.getElementById('status'),sum=document.getElementById('summary');
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span>处理中...';
+  st.className='status info';st.textContent='读取文件中...';st.style.display='block';sum.style.display='none';
+
+  setTimeout(function(){
+    try{
+      var r1=new FileReader();r1.onload=function(e1){
+        var r2=new FileReader();r2.onload=function(e2){
+          try{
+            st.textContent='解析核销记录表...';
+            var wbIn=XLSX.read(e1.target.result,{type:'array'}),wsIn=wbIn.Sheets[MAIN_SHEET];
+            if(!wsIn)throw new Error('找不到「'+MAIN_SHEET+'」');
+            var raw=XLSX.utils.sheet_to_json(wsIn,{header:1,defval:null,raw:true}),hd=0;
+            for(var i=0;i<Math.min(raw.length,10);i++){if(raw[i]&&String(raw[i][0]).indexOf('车场')>=0){hd=i;break;}}
+            var rows=raw.slice(hd+1).filter(function(r){return r[0]!=null&&r[0]!=='';});
+            for(var ri=0;ri<rows.length;ri++){var rr=rows[ri],bv=ton(rr[1]);if(!isNaN(bv))rr[1]=bv;if(rr[4]!=null&&!(rr[4] instanceof Date)){var d4=dOnly(rr[4]);if(!isNaN(d4.getTime()))rr[4]=d4;}}
+
+            st.textContent='解析车辆进出报表...';
+            var wbV=XLSX.read(e2.target.result,{type:'array'}),wsV=wbV.Sheets[VEH_SHEET];
+            if(!wsV)throw new Error('找不到「'+VEH_SHEET+'」');
+            var vr=XLSX.utils.sheet_to_json(wsV,{header:1,defval:null,raw:true}),vh=0;
+            for(var iv=0;iv<Math.min(vr.length,10);iv++){if(vr[iv]&&String(vr[iv][0]).indexOf('车场')>=0){vh=iv;break;}}
+            var vehRows=vr.slice(vh+1).filter(function(r){return r[1]!=null&&r[1]!=='';});
+
+            var minD=null,maxD=null;rows.forEach(function(r){var dd=dOnly(r[4]);if(!isNaN(dd.getTime())){if(!minD||dd<minD)minD=dd;if(!maxD||dd>maxD)maxD=dd;}});
+            var period=dStr(minD)+' 至 '+dStr(maxD);
+
+            st.textContent='1/4 生成主报表...';
+            var mainR=step1_mainReport(rows);
+            var mainBuf=XLSX.write(mainR.wb,{bookType:'xlsx',type:'array',cellStyles:true});
+            var allF=[{name:f1.name.replace(/\.xlsx$/i,'').replace(/\.xls$/i,'')+'_停车票核销报表.xlsx',data:mainBuf}];
+
+            st.textContent='2/4 生成商家计费...';
+            allF=allF.concat(step2_merchantFiles(mainR.wb,period));
+
+            st.textContent='3/4 生成集团/九号...';
+            allF.push(step3_jituanReport(mainR.wb,period));
+
+            st.textContent='4/4 生成车场报表...';
+            allF.push(step4_chechangReport(mainR.wb,vehRows));
+
+            st.textContent='打包下载...';
+            var zip=new JSZip();allF.forEach(function(f){zip.file(f.name,f.data,{binary:true});});
+            zip.generateAsync({type:'blob'}).then(function(blob){
+              var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+              a.download=f1.name.replace(/\.(xlsx|xls)$/i,'')+'_报表合集.zip';
+              document.body.appendChild(a);a.click();document.body.removeChild(a);
+              var h='<table><tr><td colspan="2" style="font-weight:bold;color:#4f46e5">主报表 (31子表)</td></tr>';
+              h+='<tr><td>主表</td><td style="color:#888">'+mainR.sum[MAIN_SHEET]+' 条</td></tr>';
+              h+='<tr><td colspan="2" style="font-weight:bold;color:#4f46e5">商家计费 ('+allF.slice(1).length+'个文件)</td></tr>';
+              h+='<tr><td colspan="2" style="color:#16a34a">✅ 全部完成!</td></tr></table>';
+              sum.innerHTML=h;sum.style.display='block';
+              st.className='status ok';st.textContent='✅ 生成完成，共 '+allF.length+' 个文件!';btn.innerHTML='⚡ 一键生成全部报表';btn.disabled=false;
+            });
+          }catch(err){st.className='status err';st.textContent='❌ '+err.message;console.error(err);btn.innerHTML='⚡ 一键生成全部报表';btn.disabled=false;}
+        };r2.readAsArrayBuffer(f2);
+      };r1.readAsArrayBuffer(f1);
+    }catch(err){st.className='status err';st.textContent='❌ '+err.message;btn.innerHTML='⚡ 一键生成全部报表';btn.disabled=false;}
+  },50);
+}
+
+// ==== UI ====
+var b1=document.getElementById('box1'),b2=document.getElementById('box2'),fi1=document.getElementById('f1'),fi2=document.getElementById('f2'),nm1=document.getElementById('nm1'),nm2=document.getElementById('nm2');
+function sb(box,fi,nm){
+  ['dragenter','dragover'].forEach(function(ev){box.addEventListener(ev,function(e){e.preventDefault();box.style.borderColor='#4f46e5';});});
+  ['dragleave','drop'].forEach(function(ev){box.addEventListener(ev,function(e){e.preventDefault();box.style.borderColor='';});});
+  box.addEventListener('drop',function(e){var fs=e.dataTransfer.files;if(fs.length){fi.files=fs;fi.dispatchEvent(new Event('change'));}});
+  fi.addEventListener('change',function(){if(fi.files.length){box.classList.add('has-file');nm.textContent='✅ '+fi.files[0].name;}else{box.classList.remove('has-file');nm.textContent='';}checkReady();});
+}
+sb(b1,fi1,nm1);sb(b2,fi2,nm2);
+function checkReady(){var r=!!(fi1.files[0]&&fi2.files[0]);document.getElementById('btn').style.display=r?'block':'none';if(!r){document.getElementById('status').style.display='none';document.getElementById('summary').style.display='none';}}
+</script>
+</body>
+</html>
