@@ -39,7 +39,7 @@ def main():
 
     # Step 1: Generate main report using build_report.py
     print("=" * 60)
-    print("🅿️  停车票核销报表生成器 v2.0")
+    print("🅿️  停车票核销报表生成器 v3.0")
     print("=" * 60)
     print(f"  核销记录表: {main_file}")
     print(f"  车辆进出报表: {vehicle_file}")

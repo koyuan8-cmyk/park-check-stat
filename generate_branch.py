@@ -46,7 +46,7 @@ MERCHANT_FILES = {
 # Date helpers
 # ============================================================
 def excel_serial_to_date(serial):
-    """Convert Excel serial number to date/datetime."""
+    """Convert Excel serial number / datetime / date / 'YYYY-MM-DD' string to date/datetime."""
     if serial is None:
         return None
     if isinstance(serial, datetime):
@@ -60,7 +60,60 @@ def excel_serial_to_date(serial):
             return base + timedelta(days=int(serial))
         except:
             return None
+    if isinstance(serial, str):
+        m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})', serial.strip())
+        if m:
+            try:
+                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                return None
     return None
+
+def parse_date_value(v):
+    """Parse datetime / date / Excel serial / 'YYYY-MM-DD' string to a date object (返回 date)."""
+    d = excel_serial_to_date(v)
+    if d is None:
+        return None
+    return d.date() if isinstance(d, datetime) else d
+
+# ============================================================
+# Styles for 集团/九号 & 车场报表 (等价原版 HTML)
+# ============================================================
+from openpyxl.styles import Font as _Font, PatternFill as _Fill, Alignment as _Align, Border as _Border, Side as _Side
+
+def _mk_border(top='thin', bottom='thin', left='thin', right='thin',
+               tc='B0B0B0', bc='B0B0B0', lc='B0B0B0', rc='B0B0B0'):
+    def _s(st, c):
+        return _Side(style=st, color=c) if st else _Side()
+    return _Border(top=_s(top, tc), bottom=_s(bottom, bc),
+                   left=_s(left, lc), right=_s(right, rc))
+
+_B_THIN_J    = _mk_border()
+_B_MED_TOP_J = _mk_border(top='medium', tc='333333')
+_SJ_HDR  = {'font': _Font(name='微软雅黑', size=10, bold=True, color='1A4472'),
+            'fill': _Fill('solid', fgColor='D6E4F0'),
+            'align': _Align(horizontal='center', vertical='center'),
+            'border': _B_THIN_J}
+_SJ_CELL = {'font': _Font(name='微软雅黑', size=10),
+            'align': _Align(horizontal='center', vertical='center'),
+            'border': _B_THIN_J}
+_SJ_TOTAL = {'font': _Font(name='微软雅黑', size=11, bold=True),
+             'align': _Align(horizontal='center', vertical='center'),
+             'border': _B_MED_TOP_J}
+_MONEY = '#,##0.00'
+_TITLE_FONT = _Font(name='微软雅黑', size=14, bold=True)
+_PERIOD_FONT = _Font(name='微软雅黑', size=10, color='666666')
+_CENTER_ALIGN = _Align(horizontal='center', vertical='center')
+
+def _style_cell(ws, row, col, st, numfmt=None):
+    cell = ws.cell(row=row, column=col)
+    cell.font = st['font']
+    if 'fill' in st:
+        cell.fill = st['fill']
+    cell.alignment = st['align']
+    cell.border = st['border']
+    if numfmt:
+        cell.number_format = numfmt
 
 def format_date(d):
     """Format date for readable output."""
@@ -85,10 +138,17 @@ def read_analysis_LM(wb, sheet_name):
         val = ws.cell(row=r, column=13).value
         if label is None and val is None:
             continue
-        if label in ('总计', '(空白)', '发放时间', '日期', '求和项:停', '求和项:B', None):
+        if label in ('总计', '合计', '(空白)', '发放时间', '日期', '求和项:停', '求和项:B', None):
             continue
-        # Convert date
+        # Convert date (Excel serial number, datetime, or 'YYYY-MM-DD' string)
         d = excel_serial_to_date(label)
+        if d is None and isinstance(label, str):
+            m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})', label.strip())
+            if m:
+                try:
+                    d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    d = None
         result.append((d, val if val else 0))
     return result
 
@@ -102,9 +162,16 @@ def read_analysis_12h(wb, floor_name):
         v24 = ws.cell(row=r, column=14).value or 0   # N = 24h B
         voz = ws.cell(row=r, column=15).value or 0   # O = >1天 张
         total = ws.cell(row=r, column=16).value or 0  # P = 合计
-        if date_val in ('日期', '总计', None):
+        if date_val in ('日期', '总计', '合计', None):
             continue
         d = excel_serial_to_date(date_val)
+        if d is None and isinstance(date_val, str):
+            m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})', date_val.strip())
+            if m:
+                try:
+                    d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    d = None
         result[d] = {'12h': v12, '24h': v24, 'oz': voz, 'total': total}
     return result
 
@@ -328,7 +395,7 @@ def step3_jituan_report(main_report_path, output_dir, period_text):
     ws9 = out_wb.create_sheet(title='九号电子劵')
     create_jiuhao_sheet(ws9, wb, period_text)
 
-    out_path = os.path.join(output_dir, '2026年4月集团、九号车场电子券报表.xlsx')
+    out_path = os.path.join(output_dir, '集团、九号车场电子券报表.xlsx')
     out_wb.save(out_path)
     print(f"  已生成: {out_path}")
     wb.close()
@@ -414,6 +481,28 @@ def create_group_sheet(ws, wb, floor, account, period_text):
     # Column widths
     for col, w in [('A', 14), ('B', 16), ('C', 16), ('D', 16), ('E', 16), ('F', 12)]:
         ws.column_dimensions[col].width = w
+
+    # --- 排版 (等价原版 buildGroup) ---
+    nc = 6
+    total_r = r
+    data_end = r - 1
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=nc)
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=nc)
+    ws.row_dimensions[2].height = 32
+    ws.row_dimensions[3].height = 20
+    ws.row_dimensions[4].height = 26
+    for c in range(1, nc + 1):
+        _style_cell(ws, 4, c, _SJ_HDR)
+    for rr in range(5, data_end + 1):
+        for c in range(1, nc + 1):
+            _style_cell(ws, rr, c, _SJ_CELL, _MONEY if c in (3, 5, 6) else None)
+    ws.row_dimensions[total_r].height = 24
+    for c in range(1, nc + 1):
+        _style_cell(ws, total_r, c, _SJ_TOTAL, _MONEY if c in (3, 5, 6) else None)
+    tc2 = ws.cell(row=2, column=1)
+    tc2.font = _TITLE_FONT; tc2.alignment = _CENTER_ALIGN
+    pc3 = ws.cell(row=3, column=1)
+    pc3.font = _PERIOD_FONT; pc3.alignment = _CENTER_ALIGN
 
 def create_jiuhao_sheet(ws, wb, period_text):
     """Create 九号电子劵 sheet."""
@@ -505,6 +594,32 @@ def create_jiuhao_sheet(ws, wb, period_text):
     for col, w in [('A', 14), ('B', 6), ('C', 6), ('D', 16), ('E', 6), ('F', 6), ('G', 16), ('H', 12)]:
         ws.column_dimensions[col].width = w
 
+    # --- 排版 (等价原版九号电子劵) ---
+    nc = 8
+    total_r = r
+    data_end = r - 1
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=nc)
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=nc)
+    ws.merge_cells(start_row=4, start_column=2, end_row=4, end_column=3)
+    ws.merge_cells(start_row=4, start_column=5, end_row=4, end_column=6)
+    ws.row_dimensions[2].height = 32
+    ws.row_dimensions[3].height = 20
+    ws.row_dimensions[4].height = 26
+    ws.row_dimensions[5].height = 20
+    for c in range(1, nc + 1):
+        _style_cell(ws, 4, c, _SJ_HDR)
+        _style_cell(ws, 5, c, _SJ_HDR)
+    for rr in range(6, data_end + 1):
+        for c in range(1, nc + 1):
+            _style_cell(ws, rr, c, _SJ_CELL, _MONEY if c in (4, 7, 8) else None)
+    ws.row_dimensions[total_r].height = 24
+    for c in range(1, nc + 1):
+        _style_cell(ws, total_r, c, _SJ_TOTAL, _MONEY if c in (4, 7, 8) else None)
+    tc2 = ws.cell(row=2, column=1)
+    tc2.font = _TITLE_FONT; tc2.alignment = _CENTER_ALIGN
+    pc3 = ws.cell(row=3, column=1)
+    pc3.font = _PERIOD_FONT; pc3.alignment = _CENTER_ALIGN
+
 # ============================================================
 # Step 4: 车场报表 (来访停车卡)
 # ============================================================
@@ -535,11 +650,8 @@ def step4_chechang_report(main_report_path, vehicle_report_path, output_dir):
         plate = str(plate).strip()
 
         # Get date key from entry
-        if isinstance(entry_date_val, datetime):
-            entry_date_key = entry_date_val.date()
-        elif isinstance(entry_date_val, date):
-            entry_date_key = entry_date_val
-        else:
+        entry_date_key = parse_date_value(entry_date_val)
+        if not entry_date_key:
             continue
 
         key = (plate, entry_date_key)
@@ -555,7 +667,7 @@ def step4_chechang_report(main_report_path, vehicle_report_path, output_dir):
     sheet_mappings = [
         ('物业', '天启来访停车卡', '集团来访停车卡明细表'),
         ('哥弟', '附件七(哥弟公司来方停车卡)', '哥弟公司来访停车卡明细表'),
-        ('商管', '商业公司来访停车卡', '集团来访停车卡明细表'),
+        ('商管', '商业公司来访停车卡', '商业公司来访停车卡明细表'),
     ]
 
     out_wb = openpyxl.Workbook()
@@ -563,10 +675,19 @@ def step4_chechang_report(main_report_path, vehicle_report_path, output_dir):
 
     for sub_sheet, out_sheet_name, title in sheet_mappings:
         ws = out_wb.create_sheet(title=out_sheet_name)
-        create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title)
-        print(f"  [{sub_sheet}] → {out_sheet_name}")
+        has_data = create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title)
+        if not has_data:
+            out_wb.remove(ws)
+            print(f"  [{sub_sheet}] 无数据，跳过")
+        else:
+            print(f"  [{sub_sheet}] → {out_sheet_name}")
 
-    out_path = os.path.join(output_dir, '2026年4月车场报表(物业、集团、哥弟来访条）.xlsx')
+    out_path = os.path.join(output_dir, '车场报表(物业、集团、哥弟来访条).xlsx')
+    if not out_wb.sheetnames:
+        print("  ⚠️ 所有子表均无数据，跳过生成车场报表")
+        wb_main.close()
+        wb_veh.close()
+        return
     out_wb.save(out_path)
     print(f"  已生成: {out_path}")
 
@@ -590,32 +711,21 @@ def create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title):
         issue_time = ws_sub.cell(row=r, column=5).value  # E
         if plate and issue_time:
             plate = str(plate).strip()
-            if isinstance(issue_time, datetime):
-                issue_date = issue_time.date()
-            elif isinstance(issue_time, date):
-                issue_date = issue_time
-            else:
+            issue_date = parse_date_value(issue_time)
+            if not issue_date:
                 continue
             records.append((plate, issue_date, issue_time))
 
     if not records:
-        ws.cell(row=4, column=1, value='序号')
-        ws.cell(row=4, column=2, value='进场日期')
-        ws.cell(row=4, column=3, value='进场时间')
-        ws.cell(row=4, column=4, value='出场日期')
-        ws.cell(row=4, column=5, value='出场时间')
-        ws.cell(row=4, column=6, value='车牌号码')
-        ws.cell(row=4, column=7, value='免费额')
-        ws.cell(row=4, column=8, value='备注')
-        return
+        return False
 
     # Determine the period date (earliest entry)
     all_dates = [rec[1] for rec in records if rec[1]]
     period_date = min(all_dates) if all_dates else datetime.now().date()
 
-    # Row 3 - period (date only, formatted)
+    # Row 3 - period (年月，等价原版 monthText: '2026年7月')
     if isinstance(period_date, date):
-        ws.cell(row=3, column=1, value=period_date.strftime('%Y-%m-%d') if hasattr(period_date, 'strftime') else str(period_date))
+        ws.cell(row=3, column=1, value=f'{period_date.year}年{period_date.month}月')
 
     # Row 4 - headers
     ws.cell(row=4, column=1, value='序号')
@@ -754,6 +864,30 @@ def create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title):
     # Column widths
     for col, w in [('A', 8), ('B', 14), ('C', 12), ('D', 14), ('E', 12), ('F', 14), ('G', 10), ('H', 10)]:
         ws.column_dimensions[col].width = w
+
+    # --- 排版 (等价原版 step4 车场报表) ---
+    nc = 8
+    total_r = r
+    data_end = r - 1
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=nc)
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=nc)
+    ws.row_dimensions[2].height = 32
+    ws.row_dimensions[3].height = 20
+    ws.row_dimensions[4].height = 26
+    for c in range(1, nc + 1):
+        _style_cell(ws, 4, c, _SJ_HDR)
+    for rr in range(5, data_end + 1):
+        for c in range(1, nc + 1):
+            _style_cell(ws, rr, c, _SJ_CELL, _MONEY if c == 7 else None)
+    ws.row_dimensions[total_r].height = 24
+    for c in range(1, nc + 1):
+        _style_cell(ws, total_r, c, _SJ_TOTAL, _MONEY if c == 7 else None)
+    tc2 = ws.cell(row=2, column=1)
+    tc2.font = _TITLE_FONT; tc2.alignment = _CENTER_ALIGN
+    pc3 = ws.cell(row=3, column=1)
+    pc3.font = _PERIOD_FONT; pc3.alignment = _CENTER_ALIGN
+
+    return True
 
 # ============================================================
 # Main
