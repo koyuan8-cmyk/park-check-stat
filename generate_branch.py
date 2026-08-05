@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-生成分支报表脚本 - 第二步到第四步
+生成分支报表脚本 - 第二步到第四步 (v3.5)
 用法: python3 generate_branch.py <主报表.xlsx> <车辆进出报表.xlsx> <输出目录>
+
+v3.5: 统一页眉 &L&G (左上角 Logo) + 标准化页面设置 (A4 / 水平居中 / 统一页边距)
 """
 
 import openpyxl
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.page import PrintOptions
+from openpyxl.drawing.image import Image as _XLImage
 import os, sys, re
 from datetime import datetime, date, timedelta
 from copy import copy
 import math
+import zipfile
+import io
+import shutil
+
 
 # ============================================================
 # Config
@@ -41,6 +49,41 @@ MERCHANT_FILES = {
     '精应':     {'filename': '精应电子券4元.xlsx',
                   'title': '精 应 停 车 券 计 费 明 细 表', 'price': 4},
 }
+
+# ============================================================
+# Standardized page setup (v3.5 — matching &L&G header from 李利军3元.xls)
+# ============================================================
+# Page margins in inches (v3.5 — tight margins for single-page fit with wide rows)
+_PM_LEFT   = 0.4     # left margin
+_PM_RIGHT  = 0.4     # right margin
+_PM_TOP    = 0.5     # top margin
+_PM_BOTTOM = 0.5     # bottom margin
+_PAPER_A4  = 9       # openpyxl paper size code
+
+def _apply_page_setup(ws):
+    """Apply standardized page setup to a worksheet (v3.5).
+
+    Matches the &L&G header layout from the reference 李利军3元.xls:
+    - A4 paper, portrait
+    - Fit to 1 page wide × 1 page tall (pageSetUpPr fitToPage="1" → Excel: 将工作表打印在一页)
+    - Horizontal centering ON, vertical OFF
+    - Standardized margins
+    - Header logo via openpyxl oddHeader + VML legacyDrawingHF
+    """
+    ws.sheet_properties.pageSetUpPr = openpyxl.worksheet.properties.PageSetupProperties(fitToPage=True)
+    ws.page_setup.orientation = 'portrait'
+    ws.page_setup.paperSize = _PAPER_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    ws.print_options = PrintOptions(horizontalCentered=True, verticalCentered=False)
+    ws.page_margins.left = _PM_LEFT
+    ws.page_margins.right = _PM_RIGHT
+    ws.page_margins.top = _PM_TOP
+    ws.page_margins.bottom = _PM_BOTTOM
+    ws.page_margins.header = 0.3
+    ws.page_margins.footer = 0.3
+    # Page header logo: floating image at A1 (compatible with Excel/WPS/Numbers)
+    _add_logo_image(ws)
 
 # ============================================================
 # Date helpers
@@ -175,13 +218,247 @@ def read_analysis_12h(wb, floor_name):
         result[d] = {'12h': v12, '24h': v24, 'oz': voz, 'total': total}
     return result
 
+# ============================================================
+# Header Logo Post-Processing
+# ============================================================
+
+# Logo image path (default: Desktop)
+LOGO_PATH = os.path.expanduser('~/Desktop/logo.jpg')
+
+# Header image dimensions
+_HF_H_PT = 1.59 * 28.35  # 1.59 cm → ~45.08 pt
+_HF_W_PT = 3.74 * 28.35  # 3.74 cm → ~106.03 pt
+
+# Logo display size in pixels (96 dpi): 3.74 cm × 1.59 cm
+_LOGO_W_PX = round(3.74 * 37.795)   # ≈ 141 px
+_LOGO_H_PX = round(1.59 * 37.795)   # ≈ 60 px
+
+
+def _add_logo_image(ws, logo_path=None):
+    """Place the logo as a floating image anchored at the top-left (A1).
+
+    Unlike VML header images (&G + legacyDrawingHF), floating images render
+    reliably in Mac Excel / WPS / Numbers. These reports are single-page
+    (fitToHeight=1), so a top-left floating image is visually equivalent to
+    a header logo. Row 1 is enlarged to host the logo so it never overlaps
+    the title in row 2.
+    """
+    if logo_path is None:
+        logo_path = LOGO_PATH
+    if not os.path.exists(logo_path):
+        print(f"    ⚠ logo not found: {logo_path}, skipping logo image")
+        return
+    img = _XLImage(logo_path)
+    img.width = _LOGO_W_PX
+    img.height = _LOGO_H_PX
+    img.anchor = 'A1'
+    ws.add_image(img)
+    cur = ws.row_dimensions[1].height
+    ws.row_dimensions[1].height = max(cur, 48) if cur else 48
+
+# OOXML namespaces
+_NS_VML = 'urn:schemas-microsoft-com:vml'
+_NS_OFFICE = 'urn:schemas-microsoft-com:office:office'
+_NS_EXCEL = 'urn:schemas-microsoft-com:office:excel'
+_NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+_NS_REL = 'http://schemas.openxmlformats.org/package/2006/relationships'
+
+_REL_VML = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing'
+_REL_IMAGE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image'
+_CT_VML = 'application/vnd.openxmlformats-officedocument.vmlDrawing'
+
+
+def _add_header_logo_to_xlsx(xlsx_path, logo_path=None):
+    """Post-process an XLSX file to add header logo image to ALL sheets."""
+    if logo_path is None:
+        logo_path = LOGO_PATH
+    if not os.path.exists(logo_path):
+        print(f"    ⚠ logo not found: {logo_path}, skipping header image")
+        return
+
+    tmp_path = xlsx_path + '.tmp'
+
+    with zipfile.ZipFile(xlsx_path, 'r') as zin:
+        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+
+            # ── Read all existing files ──
+            existing = {}
+            for item in zin.infolist():
+                existing[item.filename] = zin.read(item.filename)
+
+            # ── Find ALL sheet keys ──
+            sheet_keys = []
+            for fn in existing:
+                if fn.startswith('xl/worksheets/') and fn.endswith('.xml') and '_rels' not in fn:
+                    sheet_keys.append(fn)
+
+            if not sheet_keys:
+                for fn, data in existing.items():
+                    zout.writestr(fn, data)
+                return
+
+            # ── Count existing VML files (one shared VML for all sheets) ──
+            vml_count = sum(1 for fn in existing
+                          if fn.startswith('xl/drawings/vmlDrawing') and fn.endswith('.vml'))
+            vml_count += 1
+            vml_fn = f'xl/drawings/vmlDrawing{vml_count}.vml'
+            vml_rels_fn = f'xl/drawings/_rels/vmlDrawing{vml_count}.vml.rels'
+
+            # ── Pre-calculate rel IDs per sheet ──
+            sheet_info = {}  # sheet_key -> (next_rid, sheet_rels_key)
+            for sk in sheet_keys:
+                srels_key = f'xl/worksheets/_rels/{os.path.basename(sk)}.rels'
+                srels_data = existing.get(srels_key)
+                next_rid = 1
+                if srels_data:
+                    rids = re.findall(r'rId(\d+)', srels_data.decode('utf-8'))
+                    if rids:
+                        next_rid = max(int(x) for x in rids) + 1
+                sheet_info[sk] = (next_rid, srels_key)
+
+            # ── Process each existing file ──
+            content_types_data = None
+            for fn, data in existing.items():
+                if fn == '[Content_Types].xml':
+                    content_types_data = data
+                    continue
+
+                # Modify each sheet XML with STRING ops (preserve original XML structure)
+                if fn in sheet_info:
+                    txt = data.decode('utf-8')
+
+                    # 1. Fix pageSetUpPr: MUST have fitToPage="1"
+                    if '<pageSetUpPr' in txt:
+                        if 'fitToPage' not in txt[txt.index('<pageSetUpPr'):txt.index('<pageSetUpPr')+60]:
+                            txt = txt.replace('<pageSetUpPr', '<pageSetUpPr fitToPage="1"')
+                    elif '<sheetPr>' in txt:
+                        txt = txt.replace('<sheetPr>', '<sheetPr><pageSetUpPr fitToPage="1"/>')
+                    else:
+                        txt = txt.replace('<worksheet', '<worksheet><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>')
+
+                    # 2. Fix pageSetup: force exact attribute order (fitToWidth before fitToHeight)
+                    if '<pageSetup' in txt:
+                        txt = re.sub(
+                            r'<pageSetup[^/]*/>',
+                            '<pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="1"/>',
+                            txt
+                        )
+                    else:
+                        ps_tag = '<pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="1"/>'
+                        if '<pageMargins' in txt:
+                            txt = txt.replace('<pageMargins', ps_tag + '<pageMargins')
+                        else:
+                            txt = txt.replace('</worksheet>', ps_tag + '</worksheet>')
+
+                    # 3. Fix printOptions: ensure horizontal centering
+                    if '<printOptions' in txt:
+                        txt = re.sub(
+                            r'<printOptions[^/]*/>',
+                            '<printOptions horizontalCentered="1" verticalCentered="0"/>',
+                            txt
+                        )
+                    else:
+                        po_tag = '<printOptions horizontalCentered="1" verticalCentered="0"/>'
+                        if '<pageMargins' in txt:
+                            txt = txt.replace('<pageMargins', po_tag + '<pageMargins')
+                        else:
+                            txt = txt.replace('</worksheet>', po_tag + '</worksheet>')
+
+                    # 4. Fix pageMargins: ensure standard margins
+                    margins_xml = '<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>'
+                    if '<pageMargins' in txt:
+                        txt = re.sub(r'<pageMargins[^/]*/>', margins_xml, txt)
+                    else:
+                        txt = txt.replace('</worksheet>', margins_xml + '</worksheet>')
+
+                    # 5. Remove old legacyDrawing / legacyDrawingHF elements
+                    txt = re.sub(r'<legacyDrawingHF[^>]*/>', '', txt)
+                    txt = re.sub(r'<legacyDrawing[^>]*/>', '', txt)
+
+                    # 6. Add legacyDrawingHF before </worksheet> (VML image for header &G)
+                    ld_tag = f'<legacyDrawingHF r:id="rId{sheet_info[fn][0]}"/>'
+                    txt = txt.replace('</worksheet>', ld_tag + '</worksheet>')
+
+                    data = txt.encode('utf-8')
+
+                zout.writestr(fn, data)
+
+            # ── Write/update sheet rels for each sheet ──
+            for sk, (next_rid, srels_key) in sheet_info.items():
+                vml_rel_xml = f'<Relationship Id="rId{next_rid}" Type="{_REL_VML}" Target="../drawings/vmlDrawing{vml_count}.vml"/>'
+                if srels_key in existing:
+                    txt = existing[srels_key].decode('utf-8')
+                    txt = txt.replace('</Relationships>', vml_rel_xml + '</Relationships>')
+                    zout.writestr(srels_key, txt.encode('utf-8'))
+                else:
+                    txt = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="{_NS_REL}">\n {vml_rel_xml}\n</Relationships>'
+                    zout.writestr(srels_key, txt.encode('utf-8'))
+
+            # ── VML drawing (shared by all sheets) ──
+            vml = f'''<xml xmlns:v="{_NS_VML}" xmlns:o="{_NS_OFFICE}" xmlns:x="{_NS_EXCEL}" xmlns:r="{_NS_R}">
+ <o:shapelayout v:ext="edit">
+  <o:idmap v:ext="edit" data="1"/>
+ </o:shapelayout>
+ <v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75" o:preferrelative="t"
+   path="m@4@5l@4@11@9@11@9@5xe" filled="f" stroked="f">
+  <v:stroke joinstyle="miter"/>
+  <v:formulas>
+   <v:f eqn="if lineDrawn pixelLineWidth 0"/>
+   <v:f eqn="sum @0 1 0"/>
+   <v:f eqn="sum 0 0 @1"/>
+   <v:f eqn="prod @2 1 2"/>
+   <v:f eqn="prod @3 21600 pixelWidth"/>
+   <v:f eqn="prod @3 21600 pixelHeight"/>
+   <v:f eqn="sum @0 0 1"/>
+   <v:f eqn="prod @6 1 2"/>
+   <v:f eqn="prod @7 21600 pixelWidth"/>
+   <v:f eqn="prod @7 21600 pixelHeight"/>
+  </v:formulas>
+  <v:path o:extrusionok="f" gradientshapeok="t" o:connecttype="rect"/>
+  <o:lock v:ext="edit" aspectratio="t"/>
+ </v:shapetype>
+ <v:shape id="_x0000_s1025" type="#_x0000_t75"
+   style="position:absolute;margin-left:0;margin-top:0;width:{_HF_W_PT:.2f}pt;height:{_HF_H_PT:.2f}pt;z-index:1">
+  <v:imagedata o:title="logo" r:id="rId1"/>
+  <o:lock v:ext="edit" rotation="t"/>
+ </v:shape>
+</xml>'''
+            zout.writestr(vml_fn, vml.encode('utf-8'))
+
+            # ── VML rels ──
+            vml_rels = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="{_NS_REL}">
+ <Relationship Id="rId1" Type="{_REL_IMAGE}" Target="../media/logo.jpg"/>
+</Relationships>'''
+            zout.writestr(vml_rels_fn, vml_rels.encode('utf-8'))
+
+            # ── Logo image ──
+            if 'xl/media/logo.jpg' not in existing:
+                with open(logo_path, 'rb') as lf:
+                    zout.writestr('xl/media/logo.jpg', lf.read())
+
+            # ── Content types ──
+            if content_types_data is not None:
+                ct_txt = content_types_data.decode('utf-8')
+                vml_part = f'/xl/drawings/vmlDrawing{vml_count}.vml'
+                if vml_part not in ct_txt:
+                    ct_txt = ct_txt.replace('</Types>',
+                        f'<Override PartName="{vml_part}" ContentType="{_CT_VML}"/></Types>')
+                if 'Extension="jpg"' not in ct_txt:
+                    ct_txt = ct_txt.replace('</Types>',
+                        '<Default Extension="jpg" ContentType="image/jpeg"/></Types>')
+                zout.writestr('[Content_Types].xml', ct_txt.encode('utf-8'))
+
+    # Replace original
+    shutil.move(tmp_path, xlsx_path)
+
+
 def create_merchant_sheet(ws, data, title, price, period_text=''):
     """Create a professional merchant billing sheet for client presentation."""
     from openpyxl.styles import Font, Alignment, Border, Side, PatternFill, numbers
     from openpyxl.utils import get_column_letter
 
     total_quantity = 0
-    last_data_row = 4 + len(data)
 
     # --- Styles ---
     thin_border = Border(
@@ -202,40 +479,42 @@ def create_merchant_sheet(ws, data, title, price, period_text=''):
     left_align = Alignment(horizontal='left', vertical='center')
     right_align = Alignment(horizontal='right', vertical='center')
 
-    # --- Row 1: spacer ---
-    ws.row_dimensions[1].height = 18
+    # Row 1: logo (set by _add_logo_image, height 48pt)
+    # Rows 2-3: blank spacers
+    ws.row_dimensions[2].height = 10
+    ws.row_dimensions[3].height = 10
 
-    # --- Row 2: title (merged A2:D2) ---
-    ws.merge_cells('A2:D2')
-    title_cell = ws.cell(row=2, column=1, value=title)
+    # --- Row 4: title (merged A4:D4) ---
+    ws.merge_cells('A4:D4')
+    title_cell = ws.cell(row=4, column=1, value=title)
     title_cell.font = title_font
     title_cell.alignment = center_align
-    ws.row_dimensions[2].height = 38
+    ws.row_dimensions[4].height = 38
 
-    # --- Row 3: period (merged A3:D3) ---
-    ws.merge_cells('A3:D3')
-    period_cell = ws.cell(row=3, column=1, value=period_text)
+    # --- Row 5: period (merged A5:D5) ---
+    ws.merge_cells('A5:D5')
+    period_cell = ws.cell(row=5, column=1, value=period_text)
     period_cell.font = period_font
     period_cell.alignment = center_align
-    ws.row_dimensions[3].height = 24
+    ws.row_dimensions[5].height = 24
 
-    # --- Row 4: headers ---
+    # --- Row 6: headers ---
     headers = ['类型', '日期', '一小时（张）', f'金额（{price}元/张）']
     for ci, h in enumerate(headers, 1):
-        cell = ws.cell(row=4, column=ci, value=h)
+        cell = ws.cell(row=6, column=ci, value=h)
         cell.font = header_font
         cell.alignment = center_align
         cell.fill = header_fill
         cell.border = thin_border
-    ws.row_dimensions[4].height = 30
+    ws.row_dimensions[6].height = 32
 
     # --- Data rows ---
-    data_start = 5
-    data_end = 4 + len(data)
+    data_start = 7
+    data_end = 6 + len(data)
 
     for ri, (d, quantity) in enumerate(data):
         r = data_start + ri
-        ws.row_dimensions[r].height = 22
+        ws.row_dimensions[r].height = 28
 
         # Col B: 日期
         cell_b = ws.cell(row=r, column=2, value=format_date(d) if d else '')
@@ -264,13 +543,12 @@ def create_merchant_sheet(ws, data, title, price, period_text=''):
         cell_a = ws.cell(row=data_start, column=1, value='电子劵')
         cell_a.font = data_font
         cell_a.alignment = center_align
-        # Apply border to all cells in the merged range (top-left takes the formatting)
         for rr in range(data_start, data_end + 1):
             ws.cell(row=rr, column=1).border = thin_border
 
     # --- Total row ---
-    r = 5 + len(data)
-    ws.row_dimensions[r].height = 26
+    r = 7 + len(data)
+    ws.row_dimensions[r].height = 30
 
     # Top border line above total
     total_border = Border(
@@ -305,13 +583,8 @@ def create_merchant_sheet(ws, data, title, price, period_text=''):
     ws.column_dimensions['C'].width = 18
     ws.column_dimensions['D'].width = 19
 
-    # --- Print setup ---
-    ws.sheet_properties.pageSetUpPr = openpyxl.worksheet.properties.PageSetupProperties(fitToPage=True)
-    ws.page_setup.orientation = 'landscape'
-    ws.page_margins.left = 0.5
-    ws.page_margins.right = 0.5
-    ws.page_margins.top = 0.5
-    ws.page_margins.bottom = 0.5
+    # --- Standardized page setup (v3.5) ---
+    _apply_page_setup(ws)
 
 def step2_merchant_files(main_report_path, output_dir):
     """Generate all merchant billing files."""
@@ -364,6 +637,8 @@ def step2_merchant_files(main_report_path, output_dir):
 
         out_path = os.path.join(output_dir, cfg['filename'])
         out_wb.save(out_path)
+        _add_header_logo_to_xlsx(out_path)
+
         print(f"  [{sheet_name}] → {cfg['filename']} ({len(data)} 天数据)")
 
     wb.close()
@@ -397,23 +672,24 @@ def step3_jituan_report(main_report_path, output_dir, period_text):
 
     out_path = os.path.join(output_dir, '集团、九号车场电子券报表.xlsx')
     out_wb.save(out_path)
+    _add_header_logo_to_xlsx(out_path)
     print(f"  已生成: {out_path}")
     wb.close()
 
 def create_group_sheet(ws, wb, floor, account, period_text):
     """Create a group sheet (35楼集团011 or 46楼集团007)."""
-    # Row 1 - empty
-    # Row 2 - title
-    ws.cell(row=2, column=1, value=f'集 团 {account} 账 号 免 费 停 车 数 据（电子）')
-    # Row 3 - period (reference)
-    ws.cell(row=3, column=1, value=period_text)
-    # Row 4 - headers
-    ws.cell(row=4, column=1, value='日期')
-    ws.cell(row=4, column=2, value='三小时（张）')
-    ws.cell(row=4, column=3, value='金额（2元/张）')
-    ws.cell(row=4, column=4, value='十二小时（张）')
-    ws.cell(row=4, column=5, value='金额（4元/张）')
-    ws.cell(row=4, column=6, value='合计')
+    # Rows 2-3: blank spacers
+    # Row 4 - title
+    ws.cell(row=4, column=1, value=f'集 团 {account} 账 号 免 费 停 车 数 据（电子）')
+    # Row 5 - period (reference)
+    ws.cell(row=5, column=1, value=period_text)
+    # Row 6 - headers
+    ws.cell(row=6, column=1, value='日期')
+    ws.cell(row=6, column=2, value='三小时（张）')
+    ws.cell(row=6, column=3, value='金额（2元/张）')
+    ws.cell(row=6, column=4, value='十二小时（张）')
+    ws.cell(row=6, column=5, value='金额（4元/张）')
+    ws.cell(row=6, column=6, value='合计')
 
     # Read 3h data from L-M columns
     data_3h = read_analysis_LM(wb, f'{floor}3小时')
@@ -443,7 +719,7 @@ def create_group_sheet(ws, wb, floor, account, period_text):
     # Sort dates
     sorted_dates = sorted(d for d in all_dates if d is not None)
 
-    r = 5
+    r = 7
     total_3h = 0
     total_12h = 0
     for d in sorted_dates:
@@ -452,14 +728,11 @@ def create_group_sheet(ws, wb, floor, account, period_text):
 
         ws.cell(row=r, column=1, value=format_date(d))
         ws.cell(row=r, column=2, value=v3)
-        # C = B × 2
         ws.cell(row=r, column=3, value=v3 * 2)
         ws.cell(row=r, column=3).number_format = '#,##0.00'
         ws.cell(row=r, column=4, value=v12)
-        # E = D × 4
         ws.cell(row=r, column=5, value=v12 * 4)
         ws.cell(row=r, column=5).number_format = '#,##0.00'
-        # F = C + E
         ws.cell(row=r, column=6, value=v3 * 2 + v12 * 4)
         ws.cell(row=r, column=6).number_format = '#,##0.00'
 
@@ -482,50 +755,56 @@ def create_group_sheet(ws, wb, floor, account, period_text):
     for col, w in [('A', 14), ('B', 16), ('C', 16), ('D', 16), ('E', 16), ('F', 12)]:
         ws.column_dimensions[col].width = w
 
-    # --- 排版 (等价原版 buildGroup) ---
+    # --- 排版 ---
     nc = 6
     total_r = r
     data_end = r - 1
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=nc)
-    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=nc)
-    ws.row_dimensions[2].height = 32
-    ws.row_dimensions[3].height = 20
-    ws.row_dimensions[4].height = 26
+    ws.row_dimensions[2].height = 10
+    ws.row_dimensions[3].height = 10
+    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=nc)
+    ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=nc)
+    ws.row_dimensions[4].height = 32
+    ws.row_dimensions[5].height = 20
+    ws.row_dimensions[6].height = 32
     for c in range(1, nc + 1):
-        _style_cell(ws, 4, c, _SJ_HDR)
-    for rr in range(5, data_end + 1):
+        _style_cell(ws, 6, c, _SJ_HDR)
+    for rr in range(7, data_end + 1):
+        ws.row_dimensions[rr].height = 28
         for c in range(1, nc + 1):
             _style_cell(ws, rr, c, _SJ_CELL, _MONEY if c in (3, 5, 6) else None)
-    ws.row_dimensions[total_r].height = 24
+    ws.row_dimensions[total_r].height = 30
     for c in range(1, nc + 1):
         _style_cell(ws, total_r, c, _SJ_TOTAL, _MONEY if c in (3, 5, 6) else None)
-    tc2 = ws.cell(row=2, column=1)
-    tc2.font = _TITLE_FONT; tc2.alignment = _CENTER_ALIGN
-    pc3 = ws.cell(row=3, column=1)
-    pc3.font = _PERIOD_FONT; pc3.alignment = _CENTER_ALIGN
+    tc4 = ws.cell(row=4, column=1)
+    tc4.font = _TITLE_FONT; tc4.alignment = _CENTER_ALIGN
+    pc5 = ws.cell(row=5, column=1)
+    pc5.font = _PERIOD_FONT; pc5.alignment = _CENTER_ALIGN
+
+    # --- Standardized page setup (v3.5) ---
+    _apply_page_setup(ws)
 
 def create_jiuhao_sheet(ws, wb, period_text):
     """Create 九号电子劵 sheet."""
-    # Row 1 - empty
-    # Row 2 - title
-    ws.cell(row=2, column=1, value='九 号 行 馆 停 车 券 计 费 明 细 表（电子）')
-    # Row 3 - period
-    ws.cell(row=3, column=1, value=period_text)
-    # Row 4 - headers (2 levels)
-    ws.cell(row=4, column=1, value='日期')
-    ws.cell(row=4, column=2, value='≤三小时（张）')
-    ws.cell(row=4, column=3, value=None)
-    ws.cell(row=4, column=4, value='金额（2元/张）')
-    ws.cell(row=4, column=5, value='＞三小时（张）')
-    ws.cell(row=4, column=6, value=None)
-    ws.cell(row=4, column=7, value='金额（4元/张）')
-    ws.cell(row=4, column=8, value='合计')
+    # Rows 2-3: blank spacers
+    # Row 4 - title
+    ws.cell(row=4, column=1, value='九 号 行 馆 停 车 券 计 费 明 细 表（电子）')
+    # Row 5 - period
+    ws.cell(row=5, column=1, value=period_text)
+    # Row 6 - headers (2 levels)
+    ws.cell(row=6, column=1, value='日期')
+    ws.cell(row=6, column=2, value='≤三小时（张）')
+    ws.cell(row=6, column=3, value=None)
+    ws.cell(row=6, column=4, value='金额（2元/张）')
+    ws.cell(row=6, column=5, value='＞三小时（张）')
+    ws.cell(row=6, column=6, value=None)
+    ws.cell(row=6, column=7, value='金额（4元/张）')
+    ws.cell(row=6, column=8, value='合计')
 
     # Sub-headers
-    ws.cell(row=5, column=2, value='4F')
-    ws.cell(row=5, column=3, value='6F')
-    ws.cell(row=5, column=5, value='4F')
-    ws.cell(row=5, column=6, value='6F')
+    ws.cell(row=7, column=2, value='4F')
+    ws.cell(row=7, column=3, value='6F')
+    ws.cell(row=7, column=5, value='4F')
+    ws.cell(row=7, column=6, value='6F')
 
     # Read data from main report
     # B (4F ≤3h) = 4楼3小时 M列
@@ -551,26 +830,23 @@ def create_jiuhao_sheet(ws, wb, period_text):
 
     sorted_dates = sorted(d for d in all_dates if d is not None)
 
-    r = 6
+    r = 8
     total_b = 0; total_c = 0; total_e = 0; total_f = 0
     for d in sorted_dates:
-        b = d4f3_map.get(d, 0)   # 4F ≤3h
-        c = d6f3_map.get(d, 0)   # 6F ≤3h
-        e = d4f12_map.get(d, 0)  # 4F >3h
-        f = d6f12_map.get(d, 0)  # 6F >3h
+        b = d4f3_map.get(d, 0)
+        c = d6f3_map.get(d, 0)
+        e = d4f12_map.get(d, 0)
+        f = d6f12_map.get(d, 0)
 
         ws.cell(row=r, column=1, value=format_date(d))
         ws.cell(row=r, column=2, value=b)
         ws.cell(row=r, column=3, value=c)
-        # D = (B+C) × 2
         ws.cell(row=r, column=4, value=(b + c) * 2)
         ws.cell(row=r, column=4).number_format = '#,##0.00'
         ws.cell(row=r, column=5, value=e)
         ws.cell(row=r, column=6, value=f)
-        # G = (E+F) × 4
         ws.cell(row=r, column=7, value=(e + f) * 4)
         ws.cell(row=r, column=7).number_format = '#,##0.00'
-        # H = D + G
         ws.cell(row=r, column=8, value=(b + c) * 2 + (e + f) * 4)
         ws.cell(row=r, column=8).number_format = '#,##0.00'
 
@@ -594,31 +870,37 @@ def create_jiuhao_sheet(ws, wb, period_text):
     for col, w in [('A', 14), ('B', 6), ('C', 6), ('D', 16), ('E', 6), ('F', 6), ('G', 16), ('H', 12)]:
         ws.column_dimensions[col].width = w
 
-    # --- 排版 (等价原版九号电子劵) ---
+    # --- 排版 ---
     nc = 8
     total_r = r
     data_end = r - 1
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=nc)
-    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=nc)
-    ws.merge_cells(start_row=4, start_column=2, end_row=4, end_column=3)
-    ws.merge_cells(start_row=4, start_column=5, end_row=4, end_column=6)
-    ws.row_dimensions[2].height = 32
-    ws.row_dimensions[3].height = 20
-    ws.row_dimensions[4].height = 26
+    ws.row_dimensions[2].height = 10
+    ws.row_dimensions[3].height = 10
+    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=nc)
+    ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=nc)
+    ws.merge_cells(start_row=6, start_column=2, end_row=6, end_column=3)
+    ws.merge_cells(start_row=6, start_column=5, end_row=6, end_column=6)
+    ws.row_dimensions[4].height = 32
     ws.row_dimensions[5].height = 20
+    ws.row_dimensions[6].height = 32
+    ws.row_dimensions[7].height = 28
     for c in range(1, nc + 1):
-        _style_cell(ws, 4, c, _SJ_HDR)
-        _style_cell(ws, 5, c, _SJ_HDR)
-    for rr in range(6, data_end + 1):
+        _style_cell(ws, 6, c, _SJ_HDR)
+        _style_cell(ws, 7, c, _SJ_HDR)
+    for rr in range(8, data_end + 1):
+        ws.row_dimensions[rr].height = 28
         for c in range(1, nc + 1):
             _style_cell(ws, rr, c, _SJ_CELL, _MONEY if c in (4, 7, 8) else None)
-    ws.row_dimensions[total_r].height = 24
+    ws.row_dimensions[total_r].height = 30
     for c in range(1, nc + 1):
         _style_cell(ws, total_r, c, _SJ_TOTAL, _MONEY if c in (4, 7, 8) else None)
-    tc2 = ws.cell(row=2, column=1)
-    tc2.font = _TITLE_FONT; tc2.alignment = _CENTER_ALIGN
-    pc3 = ws.cell(row=3, column=1)
-    pc3.font = _PERIOD_FONT; pc3.alignment = _CENTER_ALIGN
+    tc4 = ws.cell(row=4, column=1)
+    tc4.font = _TITLE_FONT; tc4.alignment = _CENTER_ALIGN
+    pc5 = ws.cell(row=5, column=1)
+    pc5.font = _PERIOD_FONT; pc5.alignment = _CENTER_ALIGN
+
+    # --- Standardized page setup (v3.5) ---
+    _apply_page_setup(ws)
 
 # ============================================================
 # Step 4: 车场报表 (来访停车卡)
@@ -689,6 +971,7 @@ def step4_chechang_report(main_report_path, vehicle_report_path, output_dir):
         wb_veh.close()
         return
     out_wb.save(out_path)
+    _add_header_logo_to_xlsx(out_path)
     print(f"  已生成: {out_path}")
 
     wb_main.close()
@@ -696,19 +979,17 @@ def step4_chechang_report(main_report_path, vehicle_report_path, output_dir):
 
 def create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title):
     """Create a parking card sheet."""
-    # Row 1 - empty
-    # Row 2 - title
-    ws.cell(row=2, column=1, value=title)
-    # Row 3 - period (we'll use the date from the data)
+    # Rows 2-3: blank spacers
+    # Row 4 - title
+    ws.cell(row=4, column=1, value=title)
     # Read data from main report sub-sheet
     ws_sub = wb_main[sub_sheet]
 
     # Extract plate + date from sub-sheet data rows (columns G and E)
-    # G=领取车牌 (col 7), E=发放时间 (col 5)
     records = []
     for r in range(2, ws_sub.max_row + 1):
-        plate = ws_sub.cell(row=r, column=7).value  # G
-        issue_time = ws_sub.cell(row=r, column=5).value  # E
+        plate = ws_sub.cell(row=r, column=7).value
+        issue_time = ws_sub.cell(row=r, column=5).value
         if plate and issue_time:
             plate = str(plate).strip()
             issue_date = parse_date_value(issue_time)
@@ -719,26 +1000,26 @@ def create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title):
     if not records:
         return False
 
-    # Determine the period date (earliest entry)
+    # Determine the period date (latest entry)
     all_dates = [rec[1] for rec in records if rec[1]]
-    period_date = min(all_dates) if all_dates else datetime.now().date()
+    period_date = max(all_dates) if all_dates else datetime.now().date()
 
-    # Row 3 - period (年月，等价原版 monthText: '2026年7月')
+    # Row 5 - period
     if isinstance(period_date, date):
-        ws.cell(row=3, column=1, value=f'{period_date.year}年{period_date.month}月')
+        ws.cell(row=5, column=1, value=f'{period_date.year}年{period_date.month}月')
 
-    # Row 4 - headers
-    ws.cell(row=4, column=1, value='序号')
-    ws.cell(row=4, column=2, value='进场日期')
-    ws.cell(row=4, column=3, value='进场时间')
-    ws.cell(row=4, column=4, value='出场日期')
-    ws.cell(row=4, column=5, value='出场时间')
-    ws.cell(row=4, column=6, value='车牌号码')
-    ws.cell(row=4, column=7, value='免费额')
-    ws.cell(row=4, column=8, value='备注')
+    # Row 6 - headers
+    ws.cell(row=6, column=1, value='序号')
+    ws.cell(row=6, column=2, value='进场日期')
+    ws.cell(row=6, column=3, value='进场时间')
+    ws.cell(row=6, column=4, value='出场日期')
+    ws.cell(row=6, column=5, value='出场时间')
+    ws.cell(row=6, column=6, value='车牌号码')
+    ws.cell(row=6, column=7, value='免费额')
+    ws.cell(row=6, column=8, value='备注')
 
     # Match each record with vehicle data
-    r = 5
+    r = 7
     seq = 1
     total_free = 0
 
@@ -865,27 +1146,33 @@ def create_parking_card_sheet(ws, wb_main, veh_data, sub_sheet, title):
     for col, w in [('A', 8), ('B', 14), ('C', 12), ('D', 14), ('E', 12), ('F', 14), ('G', 10), ('H', 10)]:
         ws.column_dimensions[col].width = w
 
-    # --- 排版 (等价原版 step4 车场报表) ---
+    # --- 排版 ---
     nc = 8
     total_r = r
     data_end = r - 1
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=nc)
-    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=nc)
-    ws.row_dimensions[2].height = 32
-    ws.row_dimensions[3].height = 20
-    ws.row_dimensions[4].height = 26
+    ws.row_dimensions[2].height = 10
+    ws.row_dimensions[3].height = 10
+    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=nc)
+    ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=nc)
+    ws.row_dimensions[4].height = 32
+    ws.row_dimensions[5].height = 20
+    ws.row_dimensions[6].height = 32
     for c in range(1, nc + 1):
-        _style_cell(ws, 4, c, _SJ_HDR)
-    for rr in range(5, data_end + 1):
+        _style_cell(ws, 6, c, _SJ_HDR)
+    for rr in range(7, data_end + 1):
+        ws.row_dimensions[rr].height = 28
         for c in range(1, nc + 1):
             _style_cell(ws, rr, c, _SJ_CELL, _MONEY if c == 7 else None)
-    ws.row_dimensions[total_r].height = 24
+    ws.row_dimensions[total_r].height = 30
     for c in range(1, nc + 1):
         _style_cell(ws, total_r, c, _SJ_TOTAL, _MONEY if c == 7 else None)
-    tc2 = ws.cell(row=2, column=1)
-    tc2.font = _TITLE_FONT; tc2.alignment = _CENTER_ALIGN
-    pc3 = ws.cell(row=3, column=1)
-    pc3.font = _PERIOD_FONT; pc3.alignment = _CENTER_ALIGN
+    tc4 = ws.cell(row=4, column=1)
+    tc4.font = _TITLE_FONT; tc4.alignment = _CENTER_ALIGN
+    pc5 = ws.cell(row=5, column=1)
+    pc5.font = _PERIOD_FONT; pc5.alignment = _CENTER_ALIGN
+
+    # --- Standardized page setup (v3.5) ---
+    _apply_page_setup(ws)
 
     return True
 
